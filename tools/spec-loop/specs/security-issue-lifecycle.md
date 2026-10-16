@@ -124,6 +124,19 @@ publication, with a human gate and an audit-log entry at every step.
   `gh pr create` / `gh pr edit`, not a replacement: it covers a subset of
   the list and never sees the commit message, branch name, or
   newsfragment (#1444).
+- **Subversion projects fix through a private patch, then a gated
+  commit.** `security-issue-fix` picks its flow with
+  `magpie-vcs fix-flow --declared <Tools enabled → Source control>`:
+  Git keeps the PR flow; `svn` (`asf-svn`) takes the
+  `patch-then-commit` flow in `issue-fix/subversion-flow.md`, because
+  there `commit` and `new-branch` are the publication.
+  The patch is attached to the tracker (or posted as a private comment
+  on a GitHub tracker) and drafted to `<security-list>`; only after the
+  user confirms the team cleared it does `magpie-vcs propose-commit`
+  scrub the message, the diff, new files and the branch name, refuse
+  paths outside the agreed file list, and print the commands, and
+  `commit --scrub` / `new-branch --scrub` repeat the scrub before the
+  VCS runs (exit `3` on a hit).
 - **Adversarial review before a PR, on public content only.**
   `security-issue-fix`, `security-issue-import-from-pr` (over the patch it
   verifies) and `security-issue-import-from-scan` carry the shared
@@ -264,6 +277,19 @@ publication, with a human gate and an audit-log entry at every step.
   A re-rendered hand-off comment keeps the release manager's tick, and a
   ticked box keeps later runs quiet. The reminder links the project's
   pages through the optional `security_pages_url` manifest key (#1355).
+- **With `advisory_records` configured, sync proposes the security-pages edit.**
+  The optional `advisory_records` manifest block names the site repository
+  (Git or Subversion), its working copy and a layout: one CVE 5.x JSON file
+  per CVE, or an entry in a per-release-line page whose path, section name
+  and entry come from adopter templates. In the Step 1g closed-tracker pass,
+  once cve.org reports the CVE `PUBLISHED`, the deterministic
+  `advisory-records` planner (in `generate-cve-json`) computes the change and
+  the `magpie-vcs` commands; sync proposes them as one item and runs them only
+  on confirmation, then posts an `advisory-records` marker comment with the
+  ticked checklist item. The planner refuses before publication, is
+  idempotent, escapes tracker text, and refuses a page it cannot parse. The
+  reminder never fires for such a project. `magpie-vcs` gains `update` and
+  `checkout` for it.
 
 ## Out of scope
 
