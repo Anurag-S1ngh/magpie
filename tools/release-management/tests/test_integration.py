@@ -380,3 +380,97 @@ def test_announce_draft_renders_from_a_real_load(tmp_path: Path) -> None:
     assert "Cc: dev@foo.apache.org" in draft["body"] and "foo/KEYS" in draft["body"]
     site = announce.step3(a)
     assert site["files_in_scope"] == ["content/announcements/1.0.0.md"] and site["proposed"] is True
+
+
+def test_prepare_decides_from_a_real_preflight_and_load(tmp_path: Path) -> None:
+    from release_management.prepare import archive as prepare_archive
+    from release_management.prepare import plan as prepare_plan
+    from release_management.prepare import prep as prepare_prep
+    from release_management.prepare import signing as prepare_signing
+
+    _project(
+        tmp_path,
+        {
+            "release_vote_backend": "atr",
+            "changelog_label_categories": ["needs-review=Other changes"],
+        },
+    )
+    (tmp_path / ".apache-magpie-overrides" / "release-trains.md").write_text(
+        "# Release trains\n\n## Release branches currently in flight\n\n"
+        "- **`main`** — the 1.x train; next release `1.1.0`, Release Manager @rm.\n",
+        encoding="utf-8",
+    )
+    pre = _run(tmp_path, "preflight", "prepare", "prep", "1.1.0")
+    url = "https://github.com/apache/foo/issues/1"
+    verdict = prepare_plan.verdict(
+        pre, planning_issue=url, planning_labels=["release-planning"], gh_access=True
+    )
+    assert verdict["verdict"] == "proceed" and verdict["train_covered"] is True
+    assert prepare_plan.verdict(_run(tmp_path, "preflight", "prepare", "2.0.0"), gh_access=True)[
+        "blockers"
+    ] == ["release-trains.md has no entry for version 2.0.0 or a 2.x train"]
+
+    loaded = _run(tmp_path, "load", "prepare", "prep", "1.1.0")
+    mode = prepare_archive.mode(loaded, previous_tag="1.0.0")
+    assert mode["mode"] == "drift" and mode["export_ignore_reviewed"] == "1.0.0"
+    cats = prepare_prep.parse_categories(loaded["config"].get("changelog_label_categories"))
+    assert cats == {"needs-review": "Other changes"}
+    assert loaded["config"]["version_manifest_files"] == ["setup.cfg"]
+
+    signing_load = _run(tmp_path, "load", "prepare", "automated-signing")
+    gate = prepare_signing.eligibility(signing_load, verify_rc_identical=True)
+    assert gate["eligible"] is True, gate["missing_conditions"]
+    assert prepare_signing.eligibility(signing_load)["missing_conditions"] == [
+        prepare_signing.NOT_REPRODUCIBLE
+    ]
+
+
+def test_archive_review_protects_the_voter_inputs_of_a_real_load(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`prepare archive-review --load` reads the RAT paths and validators `release-config load` prints."""
+    import json
+
+    from release_management.cli import main
+
+    config = tmp_path / ".apache-magpie-overrides"
+    config.mkdir()
+    (config / "release-management-config.md").write_text(_rmc(RMC), encoding="utf-8")
+    build = (
+        BUILD
+        + "\n## Apache RAT configuration\n\n- **RAT plugin config:** `dev/rat.yml`.\n"
+        + "- **RAT excludes file:** `dev/rat-excludes.txt`.\n"
+        + "\n## Source-tree validators\n\n```yaml\nsource_tree_validators:\n"
+        + '  - "dev/check-tree.sh --strict"\n```\n'
+    )
+    (config / "release-build.md").write_text(build, encoding="utf-8")
+    (config / "project.md").write_text(
+        "# Project\n\n| Key | Value |\n|---|---|\n| `organization` | `ASF` |\n", encoding="utf-8"
+    )
+    loaded = release_config_cli.run(
+        ["load", "--project-root", str(tmp_path), "--user-config", str(tmp_path / "absent.md")]
+    )
+    assert loaded["build"]["rat_excludes_path"] == "dev/rat-excludes.txt"
+    assert loaded["build"]["rat_config_path"] == "dev/rat.yml"
+    assert loaded["build"]["source_tree_validators"] == ["dev/check-tree.sh --strict"]
+    (tmp_path / "load.json").write_text(json.dumps(loaded), encoding="utf-8")
+    tracked = [
+        "LICENSE",
+        "NOTICE",
+        "dev/rat-excludes.txt",
+        "dev/rat.yml",
+        "dev/check-tree.sh",
+        "dev/notes.md",
+    ]
+    (tmp_path / "tracked.txt").write_text("\n".join(tracked) + "\n", encoding="utf-8")
+    voters = ("dev/rat-excludes.txt", "dev/rat.yml", "dev/check-tree.sh")
+    argv = ["prepare", "archive-review", "--load", str(tmp_path / "load.json")]
+    argv += ["--tracked", str(tmp_path / "tracked.txt")]
+    for path in voters:
+        argv += ["--exclude", path]
+    assert main(argv) == 0
+    out = json.loads(capsys.readouterr().out)
+    refused = {r["path"]: r["reason"] for r in out["refused"]}
+    for path in voters:
+        assert refused[path].startswith("an input to the checks voters run"), path
+    assert not set(voters) & {p["path"] for p in out["proposed"]}
