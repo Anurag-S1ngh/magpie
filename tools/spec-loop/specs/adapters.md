@@ -67,6 +67,26 @@ by swapping the adapter, not the skill.
   commits only the tracker root (and pushes on Git). `###` body fields are
   read and written through a byte-identical copy of github-body-field's
   parser; field values have every line that would end a field escaped.
+  Reads and writes keep each file's line endings (LF, CRLF or CR, and a
+  missing final newline), so a field write changes no other byte on a Git
+  checkout with `core.autocrlf` or an SVN one with `svn:eol-style`; a file
+  mixing line endings is refused. A test runs the body-field conformance
+  cases through the store on temporary Git and SVN storage and reads them
+  back from a fresh checkout.
+  `detect` reports `field_layout` (`default` or `custom`, with the field
+  names two or more reports share as evidence, never report text). A
+  `custom` layout is read only through the project's own parser, generated
+  by `setup config` from `tools/body-field-contract/formats/_template.py`
+  into `.apache-magpie-overrides/tools/local-tracker/parsers/`, passed
+  through the conformance suite, and enabled by the user running
+  `trust-parser` in their own terminal, which asks there and refuses without
+  one (`body_parser: {path, sha256}` in the descriptor, the hash also in
+  `~/.config/apache-magpie/local-tracker-parsers.json`, outside every working
+  copy and never writable from the sandbox). Every command loads it only
+  when the path stays in that directory (no `..`, no symlink) and both
+  hashes match, and stops with exit 2 otherwise, never falling back to the
+  default parser. `tools/body-field-contract/formats/` is the upstream home
+  for such format adapters; the conformance suite runs every one there.
 - `tools/jira/` also ships `magpie-jira-tracker` (`jira_bridge.security_tracker`),
   the stdlib-only `contract:security-tracker` backend over Jira REST v2;
   `create` always sets the configured issue-security level and every write on
@@ -83,7 +103,9 @@ by swapping the adapter, not the skill.
   for every reader and writer; `normalise`
   returns the canonical body, its changes and the duplicate /
   container-heading decisions it will not make, and reads and writes
-  refuse an ambiguous field, #1672) and `tools/github-rollup/` (`contract:tracker`,
+  refuse an ambiguous field, #1672; the rules are the language-neutral
+  `tools/body-field-contract/` (`contract:body-field`), whose conformance
+  cases every implementation passes) and `tools/github-rollup/` (`contract:tracker`,
   stdlib-only), which maintains the single status-rollup comment on a
   tracker issue in a subprocess so the growing rollup body never enters
   agent context.
