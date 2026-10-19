@@ -144,6 +144,27 @@ def test_the_pr_management_family_guide_comes_on_the_next_run(project: Path, ver
     assert due(project, "pr-triage") == [("general", "again")]
 
 
+def test_the_contributor_growth_family_guide_comes_on_the_next_run(project: Path, version) -> None:
+    for skill in (
+        "activity-sweep",
+        "calibrate",
+        "candidate-screen",
+        "committer-onboarding",
+        "contributor-to-committer",
+        "identity-map",
+        "nomination",
+        "onboarding-concierge",
+        "sentiment",
+    ):
+        assert welcome.family_of(skill) == "contributor-growth"
+
+    assert due(project, "activity-sweep") == [("general", "first-run")]
+    welcome.record(project, "general", "seen")
+    assert due(project, "activity-sweep") == [("contributor-growth", "first-run")]
+    welcome.record(project, "contributor-growth", "seen")
+    assert due(project, "activity-sweep") == [("general", "again")]
+
+
 def test_at_most_one_guide_per_run(project: Path, version) -> None:
     for _ in range(8):
         found = welcome_findings(project, SECURITY_SKILL)
@@ -441,14 +462,31 @@ def test_show_without_color_prints_the_markdown(capsys) -> None:
 
 def test_the_rules_section_and_all_guides_ship() -> None:
     assert welcome.SECTION in sections.available()
-    assert {"general", "security", "utilities", "mentoring", "pairing", "issue", "pr-management"} <= set(
-        welcome.guides()
-    )
+    assert {
+        "general",
+        "security",
+        "utilities",
+        "mentoring",
+        "pairing",
+        "issue",
+        "pr-management",
+        "contributor-growth",
+    } <= set(welcome.guides())
     assert welcome.family_guides() == [g for g in welcome.guides() if g != "general"]
 
 
 @pytest.mark.parametrize(
-    "name", ["general", "security", "utilities", "mentoring", "pairing", "issue", "pr-management"]
+    "name",
+    [
+        "general",
+        "security",
+        "utilities",
+        "mentoring",
+        "pairing",
+        "issue",
+        "pr-management",
+        "contributor-growth",
+    ],
 )
 def test_each_guide_is_short_and_ends_with_the_way_back(name: str) -> None:
     text = welcome.guide(name) or ""
@@ -475,7 +513,8 @@ def test_the_footer_is_shared_and_filled_in_per_guide() -> None:
     pairing = welcome.guide("pairing") or ""
     issue = welcome.guide("issue") or ""
     pr_management = welcome.guide("pr-management") or ""
-    for text in (security, general, utilities, mentoring, pairing, issue, pr_management):
+    contributor_growth = welcome.guide("contributor-growth") or ""
+    for text in (security, general, utilities, mentoring, pairing, issue, pr_management, contributor_growth):
         assert "{{" not in text
         assert "welcome footer: generated" not in text
     assert "`/magpie-setup:welcome-guide security`" in security
@@ -492,6 +531,8 @@ def test_the_footer_is_shared_and_filled_in_per_guide() -> None:
     assert "--family issue --color=always" in issue
     assert "`/magpie-setup:welcome-guide pr-management`" in pr_management
     assert "--family pr-management --color=always" in pr_management
+    assert "`/magpie-setup:welcome-guide contributor-growth`" in contributor_growth
+    assert "--family contributor-growth --color=always" in contributor_growth
 
 
 def test_list_prints_every_guide(capsys) -> None:
