@@ -163,6 +163,25 @@ publication, with a human gate and an audit-log entry at every step.
   recap. The root-cause judgement, the headline and analysis, and any
   merged summary or widened versions stay with the model.
   `shared.numbered` is the numbered-proposal reply grammar both skills use.
+  For `security-issue-sync` it parses the selector into its `gh` reads (a
+  malformed `CVE-…` token stops it before any search), resolves their
+  results (the rejections ledger dropped, the closed `announced` bucket
+  cut to 90 days, a CVE matched only in the *CVE tool link* field, capped
+  lists flagged), writes the batched pre-flight read and applies the
+  no-op rule table (never skipping an explicitly named tracker), sorts
+  the subagent reports into the CVE-affecting and non-CVE-affecting
+  buckets (the `allocated → review-ready` push riding the latter), parses
+  the single and bulk confirmation forms, checks the proposal's surfaces
+  against the Guardrails (reporter CVSS, other ASF projects, link forms)
+  and renders the recap. It also resolves the security CC through the
+  configuration layers (an explicit null disables the fallback) and the
+  drafting backend, routes each GHSA advisory change by access tier (an
+  admin-only change at the collaborator tier, or after a `403`, is a draft
+  relay, never a tracker comment), and walks the Step 5b push flow,
+  checking the title, upgrade-target and CWE gates itself and taking the
+  four judged gates as the model's verdicts; mining signals, gathering
+  state, judging those gates and writing comments and drafts stay with
+  the model.
 - Shared recipes instead of per-skill copies (#1437): the safe-create
   recipe for a tracker with an attacker-controlled title is
   `tools/github/operations.md` § *Create* (Write-tool title file,
