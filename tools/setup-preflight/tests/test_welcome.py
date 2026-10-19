@@ -113,6 +113,29 @@ def test_the_pairing_family_guide_comes_on_the_next_run(project: Path, version) 
     assert due(project, "self-review") == [("general", "again")]
 
 
+def test_the_issue_family_guide_comes_on_the_next_run(project: Path, version) -> None:
+    for skill in (
+        "backlog-stats",
+        "deduplicate",
+        "fix-workflow",
+        "reassess",
+        "reassess-stats",
+        "reproducer",
+        "stale-sweep",
+    ):
+        assert welcome.family_of(skill) == "issue"
+
+    # The bare issue-triage name belongs to Security, not Issue.
+    assert welcome.family_of("issue-triage") == "security"
+    assert welcome.family_of("magpie-issue-triage") == "issue"
+
+    assert due(project, "magpie-issue-triage") == [("general", "first-run")]
+    welcome.record(project, "general", "seen")
+    assert due(project, "magpie-issue-triage") == [("issue", "first-run")]
+    welcome.record(project, "issue", "seen")
+    assert due(project, "magpie-issue-triage") == [("general", "again")]
+
+
 def test_at_most_one_guide_per_run(project: Path, version) -> None:
     for _ in range(8):
         found = welcome_findings(project, SECURITY_SKILL)
@@ -410,11 +433,11 @@ def test_show_without_color_prints_the_markdown(capsys) -> None:
 
 def test_the_rules_section_and_both_guides_ship() -> None:
     assert welcome.SECTION in sections.available()
-    assert {"general", "security", "utilities", "mentoring", "pairing"} <= set(welcome.guides())
+    assert {"general", "security", "utilities", "mentoring", "pairing", "issue"} <= set(welcome.guides())
     assert welcome.family_guides() == [g for g in welcome.guides() if g != "general"]
 
 
-@pytest.mark.parametrize("name", ["general", "security", "utilities", "mentoring", "pairing"])
+@pytest.mark.parametrize("name", ["general", "security", "utilities", "mentoring", "pairing", "issue"])
 def test_each_guide_is_short_and_ends_with_the_way_back(name: str) -> None:
     text = welcome.guide(name) or ""
     assert not text.startswith("<!--")
@@ -438,7 +461,8 @@ def test_the_footer_is_shared_and_filled_in_per_guide() -> None:
     utilities = welcome.guide("utilities") or ""
     mentoring = welcome.guide("mentoring") or ""
     pairing = welcome.guide("pairing") or ""
-    for text in (security, general, utilities, mentoring, pairing):
+    issue = welcome.guide("issue") or ""
+    for text in (security, general, utilities, mentoring, pairing, issue):
         assert "{{" not in text
         assert "welcome footer: generated" not in text
     assert "`/magpie-setup:welcome-guide security`" in security
@@ -451,6 +475,8 @@ def test_the_footer_is_shared_and_filled_in_per_guide() -> None:
     assert "--family mentoring --color=always" in mentoring
     assert "`/magpie-setup:welcome-guide pairing`" in pairing
     assert "--family pairing --color=always" in pairing
+    assert "`/magpie-setup:welcome-guide issue`" in issue
+    assert "--family issue --color=always" in issue
 
 
 def test_list_prints_every_guide(capsys) -> None:
