@@ -521,7 +521,7 @@ the four gates that need judgement (trigger conditions, the incomplete-fix claus
 
    ```bash
    uv run --project <framework>/tools/cve-tool-vulnogram/oauth-api vulnogram-api-record-fetch \
-     --cve-id <CVE-ID> --jq '.body.CNA_private.state'
+     --cve-id <CVE-ID> --state-only
    ```
 
    If that fetch entrypoint is not yet installed on the operator's machine (see [`tools/cve-tool-vulnogram/oauth-api/README.md`](../../../../tools/cve-tool-vulnogram/oauth-api/README.md)),
