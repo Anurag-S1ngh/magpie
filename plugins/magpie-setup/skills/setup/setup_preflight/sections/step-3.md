@@ -16,16 +16,37 @@ the release segment. The reconciliation check in step 4 is gated on the
 fingerprint, never on this version delta.
 
 **Why an unreadable result is *unknown* rather than *absent*.** Inside a
-sandboxed session the plugin cache is read-denied and `claude plugin list
---json` returns `[]` there — that reads exactly like "nothing installed"
+sandboxed session the plugin cache is read-denied and the running harness's
+own listing returns `[]` there — that reads exactly like "nothing installed"
 but is not. Acting on it would propose installing a project's entire floor
 on every sandboxed run.
 
-**The actions.**
+For Codex, read only the `installed` list in its JSON envelope; available
+catalogue entries are not installed versions. An unfamiliar name form or
+schema stays unknown. Require an exact floor plugin name before trusting
+a Codex listing, and the exact `magpie` extension name on Gemini.
 
-- a floor plugin absent → `claude plugin install <plugin>@apache-magpie`;
-- a floor plugin below `min_version` → `claude plugin update
-  <plugin>@apache-magpie`.
+**The actions.**  The `below-floor` finding names the harness its listing
+came from (`facts.harness`); the commands differ per client, and naming one
+the operator cannot run in this session wastes their turn:
+
+| Harness | a floor plugin absent | a floor plugin below `min_version` |
+|---|---|---|
+| Claude Code | `claude plugin install <plugin>@apache-magpie` | `claude plugin update <plugin>@apache-magpie` |
+| Codex | `codex plugin add <plugin>@apache-magpie` | `codex plugin marketplace upgrade apache-magpie` |
+| Gemini CLI | `gemini extensions install https://github.com/apache/magpie` | `gemini extensions update magpie` |
+
+Gemini installs the framework as one extension, so on it the floor is
+carried by the `magpie` extension as a whole: update that one extension
+rather than naming individual plugins.
+
+`facts.harness` is `null` when the caller supplied the listing and no
+harness with a listing command is running. Use the row of the harness this
+session runs in; if that is not known, print every row rather than guess.
+
+Copilot CLI installs from a repo URL or catalogue and has no plugin CLI to
+read a listing or run an action with. There the floor stays unknown: run
+nothing, and leave it to the user.
 
 Where there is no such CLI, run nothing and print the commands instead.
 

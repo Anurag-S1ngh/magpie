@@ -152,12 +152,23 @@ def _snapshot_findings(lock: Lock, root: Path) -> list[Finding]:
     return []
 
 
-def _floor_findings(lock: Lock, installed: dict[str, str] | None) -> list[Finding]:
+def _floor_findings(lock: Lock, installed: dict[str, str] | None, harness: str | None) -> list[Finding]:
     if lock.url and lock.url != TRUSTED_MARKETPLACE:
         return [Finding("project", "untrusted-marketplace", "step-3", {"url": lock.url})]
     if installed is None:
         # Unknown, never absent.  Say nothing and let the run continue: this
         # is the ordinary state of a sandboxed session, not a fault.
+        return []
+    if harness == "gemini":
+        # Gemini ships all families in one extension. Its version carries
+        # every floor entry; an unrecognised extension name is unknown.
+        version = installed.get("magpie")
+        if version is None:
+            return []
+        installed = dict.fromkeys(lock.plugins, version)
+    elif harness == "codex" and not any(name in installed for name in lock.plugins):
+        # Until a listing identifies an exact floor name, qualified names
+        # or an unfamiliar schema are not evidence that plugins are absent.
         return []
     missing = [name for name in lock.plugins if name not in installed]
     outdated = []
@@ -177,7 +188,7 @@ def _floor_findings(lock: Lock, installed: dict[str, str] | None) -> list[Findin
             "project",
             "below-floor",
             "step-3",
-            {"missing": missing, "outdated": outdated, "restart_required": True},
+            {"missing": missing, "outdated": outdated, "restart_required": True, "harness": harness},
         )
     ]
 
@@ -223,8 +234,16 @@ def legacy_layout_findings(root: Path) -> list[Finding]:
     ]
 
 
-def project_findings(root: Path, installed: dict[str, str] | None) -> list[Finding]:
-    """Everything true of the checkout rather than of one skill."""
+def project_findings(
+    root: Path, installed: dict[str, str] | None, harness: str | None = None
+) -> list[Finding]:
+    """Everything true of the checkout rather than of one skill.
+
+    `harness` is the agent the session is running under, as the floor
+    check measured it — `None` when the listing came from `--plugin-list`
+    or could not be read.  It travels with the findings so the rules can
+    name that harness's own install and update commands.
+    """
     lock = load(root / LOCK_NAME)
     if lock is None:
         # A supported end state, not a fault: the marketplace install
@@ -235,7 +254,7 @@ def project_findings(root: Path, installed: dict[str, str] | None) -> list[Findi
     if lock.method in SNAPSHOT_METHODS:
         return _snapshot_findings(lock, root)
     if lock.method == "marketplace":
-        return _floor_findings(lock, installed)
+        return _floor_findings(lock, installed, harness)
     if lock.method == LOCAL_METHOD:
         return []
     return [Finding("project", "unknown-method", "step-2", {"method": lock.method})]
@@ -483,7 +502,7 @@ def isolated_setup_findings(
 # --- memoising the project scope ----------------------------------------------------
 
 
-def _cache_key(root: Path, installed: dict[str, str] | None) -> str:
+def _cache_key(root: Path, installed: dict[str, str] | None, harness: str | None) -> str:
     # Linked worktrees of an adopted repository can share their main
     # checkout's personal layer, and so this cache file: key it on the
     # checkout as well, so one worktree never serves another's verdict.
@@ -496,6 +515,9 @@ def _cache_key(root: Path, installed: dict[str, str] | None) -> str:
     # The legacy-layout finding depends on the in-tree directory existing.
     parts.append("legacy:" + ("1" if legacy_local_dir(root) is not None else "-"))
     parts.append("installed:" + ("?" if installed is None else json.dumps(installed, sort_keys=True)))
+    # The below-floor finding names the harness the listing came from, so a
+    # verdict computed under one harness must not be served to another.
+    parts.append("harness:" + (harness or "-"))
     # The verdict is also a function of this code: an upgrade that refreshes
     # the checker must not keep serving the previous checker's answer.
     here = Path(__file__).parent
@@ -512,6 +534,7 @@ def _cache_key(root: Path, installed: dict[str, str] | None) -> str:
 def cached_project_findings(
     root: Path,
     installed: dict[str, str] | None,
+    harness: str | None = None,
     *,
     now: float | None = None,
 ) -> tuple[list[Finding], bool]:
@@ -519,19 +542,19 @@ def cached_project_findings(
 
     Returns `(findings, was_cached)`.  The cache lives in the personal
     layer (`layers.personal_dir`, which in a linked worktree of an adopted
-    repository may be its main checkout's), is keyed on the checkout, the lock files' identity and
-    the plugin listing, and expires so that a plugin installed mid-session
-    is picked up by the next skill rather than at the end of the day.  A
-    project whose personal layer does not exist is not cached at all —
-    creating it would create the very state whose absence the skill scope
-    reads as "never configured".
+    repository may be its main checkout's), is keyed on the checkout, the lock files' identity,
+    the plugin listing and the harness the listing came from, and expires
+    so that a plugin installed mid-session is picked up by the next skill
+    rather than at the end of the day.  A project whose personal layer
+    does not exist is not cached at all — creating it would create the
+    very state whose absence the skill scope reads as "never configured".
     """
     local_dir = personal_dir(root)
     if local_dir is None or not local_dir.is_dir():
-        return project_findings(root, installed), False
+        return project_findings(root, installed, harness), False
 
     stamp_now = now if now is not None else time.time()
-    key = _cache_key(root, installed)
+    key = _cache_key(root, installed, harness)
     cache_path = local_dir / CACHE_NAME
     if cache_path.exists():
         try:
@@ -548,7 +571,7 @@ def cached_project_findings(
             if isinstance(entries, list):
                 return [Finding(**entry) for entry in entries], True
 
-    findings = project_findings(root, installed)
+    findings = project_findings(root, installed, harness)
     payload = {"key": key, "at": stamp_now, "findings": [asdict(f) for f in findings]}
     tmp = cache_path.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload), encoding="utf-8")

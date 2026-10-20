@@ -26,12 +26,19 @@ verdict is rendered, never written:
 
 * `lock` — the committed `.apache-magpie.lock` lines, or `null` for none.
   A lock also gets `.apache-magpie-overrides/project.md`.
-* `plugins` — `[[name, version], ...]` for `claude plugin list --json`, or
-  the string `"unreadable"` for a listing that cannot be parsed (no `claude`
-  on `PATH`).
+* `plugins` — `[[name, version], ...]` for the running harness's listing,
+  or the string `"unreadable"` for output that cannot be parsed. Codex
+  entries are wrapped in its `installed` / `available` JSON envelope.
 * `requires` — `requires_config:` entries passed as `--requires`.
 * `skill`, `hash` — the invoking skill's `name:` and `surface_hash:`.
 * `reconciled` — dict written to personal layer `reconciled.json`, or `null`.
+* `harness` — the harness whose session the case runs in (`codex`,
+  `copilot`, `gemini`, or `claude`). The renderer puts that harness's
+  session markers in the environment and a stub listing command on `PATH`
+  that prints `plugins`, so the checker detects the harness itself and
+  reads the listing the way that harness's session would produce it.
+  Left out for no markers at all, which the checker reports as an unknown
+  harness.
 * `welcome` — `true` to include the skill family's first-run welcome guide.
   Left out otherwise (`--no-welcome`), so a floor case is about the floor
   and not about which family its skill happens to belong to.
@@ -57,6 +64,16 @@ CHECKER = Path("plugins/magpie-setup/skills/setup")
 MARKER = "\nThe pre-flight command printed:\n"
 DEFAULT_SKILL = "issue-triage"
 DEFAULT_HASH = "sha256:2edc90a1b7f3440d"
+
+#: The session markers each harness self-detects by, mirroring the
+#: checker's own `HARNESS_LISTINGS` marker order (the listing command is
+#: the checker's business, not the renderer's).
+HARNESS_ENV: dict[str, dict[str, str]] = {
+    "codex": {"CODEX_SANDBOX": "1"},
+    "copilot": {"COPILOT_CLI": "1"},
+    "gemini": {"GEMINI_CLI": "1"},
+    "claude": {"CLAUDECODE": "1"},
+}
 
 
 def run_checker(state: dict[str, object], repo_root: Path, scratch: Path) -> str:
@@ -84,14 +101,40 @@ def run_checker(state: dict[str, object], repo_root: Path, scratch: Path) -> str
         personal.mkdir(parents=True, exist_ok=True)
         (personal / "reconciled.json").write_text(json.dumps(reconciled), encoding="utf-8")
 
+    harness = state.get("harness")
     listing = scratch / "plugins.json"
     plugins = state.get("plugins")
     if plugins == "unreadable":
-        listing.write_text("zsh: command not found: claude\n", encoding="utf-8")
+        listing.write_text("listing unavailable\n", encoding="utf-8")
     elif isinstance(plugins, list):
-        listing.write_text(json.dumps([{"name": n, "version": v} for n, v in plugins]), encoding="utf-8")
+        entries = [{"name": n, "version": v} for n, v in plugins]
+        payload = {"installed": entries, "available": []} if harness == "codex" else entries
+        listing.write_text(json.dumps(payload), encoding="utf-8")
     else:
         raise ValueError('`plugins` must be a list of [name, version] or "unreadable"')
+
+    if harness is not None:
+        # The checker must detect this harness itself, from the same session
+        # markers a live session carries, and read the harness's own listing
+        # command — a stub on PATH that prints the case's listing. Passing
+        # `--plugin-list` would describe the listing as already read, which
+        # is exactly the "the harness is then not known" case.
+        if not isinstance(harness, str) or harness not in HARNESS_ENV:
+            raise ValueError(f"`harness` must be one of {', '.join(sorted(HARNESS_ENV))} or null")
+        markers: dict[str, str] = HARNESS_ENV[harness]
+        bin_dir = scratch / "bin"
+        bin_dir.mkdir()
+        listing_arg = str(listing).replace("\\", "/")
+        stub = bin_dir / harness
+        stub.write_text(f'#!/bin/sh\ncat "{listing_arg}"\n', encoding="utf-8")
+        os.chmod(stub, 0o700)  # owner-only: the renderer runs it as itself
+        (bin_dir / f"{harness}.bat").write_text(f'@echo off\ntype "{listing}"\r\n', encoding="utf-8")
+        env = _env(scratch)
+        env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
+        env.update(markers)
+    else:
+        env = _env(scratch)
+    env["PYTHONPATH"] = str(repo_root / CHECKER)
 
     args = [
         sys.executable,
@@ -103,14 +146,15 @@ def run_checker(state: dict[str, object], repo_root: Path, scratch: Path) -> str
         str(state.get("hash", DEFAULT_HASH)),
         "--project-root",
         str(project),
-        "--plugin-list",
-        str(listing),
         "--no-cache",
         "--verify-interval-days",
         "0",
         "--isolated-setup-interval-days",
         "0",
     ]
+    if harness is None:
+        # No harness to detect: hand the checker the listing as already read.
+        args += ["--plugin-list", str(listing)]
     requires = state.get("requires", [])
     if not isinstance(requires, list):
         raise ValueError("`requires` must be a list")
@@ -119,8 +163,19 @@ def run_checker(state: dict[str, object], repo_root: Path, scratch: Path) -> str
     if state.get("welcome") is not True:
         args.append("--no-welcome")
 
-    env = _env(scratch)
-    env["PYTHONPATH"] = str(repo_root / CHECKER)
+    if os.name == "nt" and harness is not None:
+        # CreateProcess does not search PATHEXT for a bare command name.
+        # Resolve only the fixture's .bat stub; keep harness detection,
+        # listing arguments, parsing and the checker itself unchanged.
+        launcher = (
+            "from setup_preflight import cli; "
+            f"name = {harness!r}; stub = {str(bin_dir / (harness + '.bat'))!r}; "
+            "[(argv.__setitem__(0, stub)) for h, _, argv in cli.HARNESS_LISTINGS "
+            "if h == name and argv is not None]; "
+            "raise SystemExit(cli.main())"
+        )
+        args[1:3] = ["-c", launcher]
+
     result = subprocess.run(args, capture_output=True, text=True, env=env, cwd=project, check=False)
     if result.returncode != 0:
         raise RuntimeError(f"setup_preflight exited {result.returncode}: {result.stderr.strip()}")
@@ -131,13 +186,19 @@ def _env(scratch: Path) -> dict[str, str]:
     """A minimal environment, so nothing on the host leaks into a verdict."""
     home = scratch / "home"
     home.mkdir(exist_ok=True)
-    return {
+    env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": str(home),
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": os.devnull,
         "LC_ALL": "C",
     }
+    if os.name == "nt":
+        # Windows needs these to launch batch stubs from the child Python.
+        for key in ("SystemRoot", "COMSPEC"):
+            if key in os.environ:
+                env[key] = os.environ[key]
+    return env
 
 
 def render_report(prose: str, verdict: str) -> str:
@@ -180,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
             continue
         stale.append(report)
         if not args.check:
-            report.write_text(text, encoding="utf-8")
+            report.write_text(text, encoding="utf-8", newline="\n")
 
     if not stale:
         return 0
