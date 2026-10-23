@@ -35,7 +35,8 @@ members are grouped:
 Prints a JSON array of `{"key", "name", "paths", "packages"}` for the workflow's
 matrix (`paths` and `packages` space-separated, in the same order; `packages` are
 the members' project names, so a job syncs only what its members declare).
-`--changed-file` names a file listing the changed paths; omit it for a full run.
+`--changed-file` names a file listing the changed paths, or `-` to read them from stdin;
+omit it for a full run.
 `--paths` prints the picked member paths one per line instead, for the local
 `workspace-pytest` hook, so a commit runs the same members a pull request would.
 """
@@ -209,16 +210,18 @@ def batches(paths: list[str], weights: dict[str, int]) -> list[dict[str, str]]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--root", type=Path, default=Path("."))
-    parser.add_argument("--changed-file", type=Path, help="file listing a pull request's changed paths")
+    parser.add_argument(
+        "--changed-file", type=Path, help="file listing a pull request's changed paths, or - for stdin"
+    )
     parser.add_argument("--paths", action="store_true", help="print the picked member paths, one per line")
     args = parser.parse_args(argv)
     changed = None
     if args.changed_file:
-        changed = [
-            line.strip()
-            for line in args.changed_file.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        if str(args.changed_file) == "-":
+            raw_lines = sys.stdin.read().splitlines()
+        else:
+            raw_lines = args.changed_file.read_text(encoding="utf-8").splitlines()
+        changed = [line.strip().replace("\\", "/") for line in raw_lines if line.strip()]
     paths = select(args.root, changed)
     if args.paths:
         for path in paths:
