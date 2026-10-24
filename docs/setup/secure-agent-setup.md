@@ -2827,11 +2827,22 @@ The hook executes only code from a location the operator installed or
 pinned, never from the repository being opened, so the second copy is
 not optional: without it the hook finds no source at session start and
 is a silent no-op — it never fails the session, it simply never starts
-the gateway. A framework contributor working inside this checkout can
-instead export `MAGPIE_CONTAINER_GATEWAY_SRC=tools/container-gateway/src`
-and skip the copy; an adopter whose `.apache-magpie/` snapshot is
-already populated needs neither, since the hook falls back to
-`<root>/.apache-magpie/tools/container-gateway/src` on its own.
+the gateway.
+A framework contributor re-copies the package after changing it: the hook
+refuses a source under any sandbox-writable directory, so neither
+`MAGPIE_CONTAINER_GATEWAY_SRC=tools/container-gateway/src` pointing into
+this checkout nor an `.apache-magpie/` snapshot is used — the project root is
+always writable from the sandbox, and the hook runs outside it.
+
+The hook also never takes `python3` from `PATH`, which project settings can
+set. It runs the first Python 3.11+ outside every writable directory among
+`/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` and uv's managed
+interpreters under `~/.local/share/uv/python`, by its real path with `-I -S`.
+The uv interpreters count only while `~/.local/share/uv` is read-only to the
+sandbox, as the reference settings keep it; a write grant over it in any
+scope makes the hook skip them. Where none qualifies, write the absolute path
+of one that does to `~/.claude/scripts/container-gateway/python`; until then
+the hook logs one line and does not start the gateway.
 
 Wire it as a `SessionStart` / `SessionEnd` pair in `~/.claude/settings.json`, alongside any other hooks already there:
 
