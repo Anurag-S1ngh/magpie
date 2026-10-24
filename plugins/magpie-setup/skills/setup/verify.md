@@ -34,7 +34,7 @@ and remediation commands; writes only the always-local
 2. **Framework checkout?** Detect structurally (as in
    [`install.md` Step 0](install.md#step-0--pre-flight)):
    `skills/setup/SKILL.md` exists at the repo root with
-   `name: magpie-setup` and `skills/list-skills/` is present. If
+   `name: setup` and `skills/list-skills/` is present. If
    so **and** `.apache-magpie.lock` records `method: local`, the
    repo is **self-adopted** — run the
    [Local self-adoption checks](#local-self-adoption-checks)
@@ -115,8 +115,17 @@ adoption state.
    `setup` otherwise.
 2. **Symlinks resolve (canonical → source, relays → canonical).**
    In the canonical dir `.agents/skills/`, every `magpie-<n>` is a
-   symlink whose target (`../../skills/<n>/`) resolves to a
-   directory containing `SKILL.md`. In every **relay** target dir
+   symlink whose target is the skill's real directory — what
+   `skills/<n>` itself points at, rebased onto `.agents/skills/`
+   (`../../plugins/<family>/skills/<alias>`, where `<alias>` is the
+   skill's frontmatter `name:` and often differs from `<n>`:
+   `magpie-pr-management-triage` →
+   `../../plugins/magpie-pr-management/skills/pr-triage`) — and
+   resolves to a directory containing `SKILL.md`. Compare against
+   that symlink, never against a pattern built from `<n>`. A target
+   of `../../skills/<n>` is ✗ — a symlink chain, which the release
+   archive refuses; `symlink-lint` enforces the rule.
+   In every **relay** target dir
    ([`agents.md`](agents.md) — `.claude/skills/`, `.github/skills/`,
    plus any present holdout), every `magpie-<n>` is a symlink whose
    target (`../../.agents/skills/magpie-<n>`) resolves through the

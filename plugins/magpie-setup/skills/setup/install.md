@@ -552,8 +552,11 @@ How it differs from a remote adoption:
   `url`/`ref`/`commit`/`sha512`), and there is no
   `.apache-magpie.local.lock`.
 - **Symlinks are committed, not gitignored.** Each
-  `magpie-<skill>` symlink targets `../../skills/<skill>/` — an
-  in-repo path that always resolves on a fresh clone — so the
+  canonical `magpie-<skill>` symlink targets the skill's real
+  directory, `../../plugins/<family>/skills/<alias>` (`<alias>` is
+  the skill's frontmatter `name:`, e.g. `pr-triage` for
+  `magpie-pr-management-triage`) — an in-repo
+  path that always resolves on a fresh clone — so the
   links are committed. They are written under **every active
   target dir** ([`agents.md`](agents.md)) — `.agents/skills/`
   (the universal path shared by Codex, Cursor, Gemini CLI,
@@ -573,7 +576,7 @@ How it differs from a remote adoption:
   [Step 5](#step-5--pick-the-skill-families-and-mcp-servers) is skipped.
   `skill-families:` is still honoured if the maintainer wants to
   narrow the set.
-- **`magpie-setup` is itself a symlink** (→ `../../skills/setup/`),
+- **`magpie-setup` is itself a symlink** (→ `../../plugins/magpie-setup/skills/setup`),
   not a committed copy. The copy-vs-symlink rule of
   [`snapshot-model.md` Golden rule 6](snapshot-model.md#the-golden-rules-that-bind-only-here) exists only
   because adopter snapshots disappear on clone; the framework's
@@ -627,7 +630,15 @@ How it differs from a remote adoption:
 6. **Create the symlinks** (canonical first, then relays). For
    each enumerated skill `<n>`:
    - **Canonical** — create `.agents/skills/magpie-<n>` →
-     `../../skills/<n>` (the in-repo source).
+     the skill's real directory: read the `skills/<n>` symlink and
+     rebase its target onto `.agents/skills/`
+     (`../../plugins/<family>/skills/<alias>` — the basename is the
+     skill's frontmatter `name:`, not `<n>`: `skills/pr-management-triage`
+     → `../plugins/magpie-pr-management/skills/pr-triage`, so the
+     canonical link is `../../plugins/magpie-pr-management/skills/pr-triage`).
+     Never build the target from `<n>`, and never point at
+     `../../skills/<n>` itself — a symlink chain, which the release
+     archive's extractor refuses. `symlink-lint` checks this.
    - **Relays** — for every *other* active target dir from
      [`agents.md`](agents.md) (`.claude/skills/`, `.github/skills/`,
      plus any present holdout), create `magpie-<n>` →
