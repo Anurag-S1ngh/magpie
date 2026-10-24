@@ -43,6 +43,8 @@ def run(action: str, cwd: Path, env_extra: dict[str, str] | None = None, home: P
         env["MAGPIE_CONTAINER_GATEWAY_DRY_RUN"] = "1"
     if home is not None:
         env["HOME"] = str(home)
+        # Worktree records go under the fake home, never the account's real one.
+        env["MAGPIE_CONTAINER_GATEWAY_STATE_DIR"] = str(home / ".claude" / "magpie-gateway")
     env.update(env_extra or {})
     return subprocess.run(["/bin/bash", str(SCRIPT), action], input=json.dumps({"cwd": str(cwd)}),
                           capture_output=True, text=True, env=env, cwd=cwd, check=False)
@@ -679,3 +681,104 @@ def test_the_launch_environment_never_runs_code(tmp_path: Path, hostile: str) ->
     assert not marker.exists()
     assert "+ " not in done.stderr  # no xtrace imported through SHELLOPTS
     assert f"container_gateway serve --project={lay.project}" in done.stdout
+
+
+# --- linked worktrees: the main checkout is anchored on first use ---
+
+
+def _linked_worktree(lay: Layout) -> Path:
+    git_env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "-C", str(lay.project), "-c", "commit.gpgsign=false", "commit", "-q",
+                    "--allow-empty", "-m", "init"], check=True, env=git_env)
+    worktree = lay.base / "wt"
+    subprocess.run(["git", "-C", str(lay.project), "worktree", "add", "-q", str(worktree)], check=True)
+    return worktree
+
+
+def _records(lay: Layout) -> list[Path]:
+    state = lay.home / ".claude" / "magpie-gateway" / "worktrees"
+    return sorted(p for p in state.iterdir() if not p.name.startswith(".")) if state.is_dir() else []
+
+
+def test_the_first_run_records_the_worktree_main_checkout(tmp_path: Path) -> None:
+    lay = Layout(tmp_path)
+    worktree = _linked_worktree(lay)
+    done = run("start", worktree, home=lay.home)
+    assert f" -I -S {lay.src} " in done.stdout
+    [record] = _records(lay)
+    assert record.read_text().splitlines() == [str(worktree), str(lay.project)]
+
+
+def test_a_changed_main_checkout_refuses_until_the_record_is_deleted(tmp_path: Path) -> None:
+    """Rewritten .git metadata could otherwise hide the real main checkout's grants at session end."""
+    lay = Layout(tmp_path)
+    worktree = _linked_worktree(lay)
+    run("start", worktree, home=lay.home)
+    [record] = _records(lay)
+    record.write_text(f"{worktree}\n{lay.base / 'the-real-main'}\n")
+    done = run("stop", worktree, home=lay.home)
+    assert done.stdout == ""
+    assert "no longer matches its worktree record" in done.stderr and str(record) in done.stderr
+    record.unlink()
+    assert f" -I -S {lay.src} " in run("stop", worktree, home=lay.home).stdout
+
+
+def test_a_symlinked_record_refuses(tmp_path: Path) -> None:
+    lay = Layout(tmp_path)
+    worktree = _linked_worktree(lay)
+    run("start", worktree, home=lay.home)
+    [record] = _records(lay)
+    target = lay.base / "planted"
+    target.write_text(record.read_text())
+    record.unlink()
+    record.symlink_to(target)
+    done = run("start", worktree, home=lay.home)
+    assert done.stdout == "" and "is a symlink" in done.stderr
+
+
+def test_the_hook_uses_no_here_documents() -> None:
+    """bash 3.2 backs <<< and << with temporary files; when one cannot be created
+    the input is silently empty, and a check reading it would fail open."""
+    text = SCRIPT.read_text()
+    code = "\n".join(line.split("#", 1)[0] for line in text.splitlines())
+    assert "<<" not in code
+
+
+def test_turning_the_worktree_into_a_plain_checkout_refuses(tmp_path: Path) -> None:
+    """Swapping the .git file for a directory must not make the record disappear."""
+    lay = Layout(tmp_path)
+    worktree = _linked_worktree(lay)
+    run("start", worktree, home=lay.home)
+    (worktree / ".git").unlink()
+    (worktree / ".git").mkdir()
+    done = run("stop", worktree, home=lay.home)
+    assert done.stdout == "" and "no longer matches its worktree record" in done.stderr
+
+
+def test_a_record_for_another_path_refuses(tmp_path: Path) -> None:
+    lay = Layout(tmp_path)
+    worktree = _linked_worktree(lay)
+    run("start", worktree, home=lay.home)
+    [record] = _records(lay)
+    record.write_text(f"{lay.base / 'someone-else'}\n{lay.project}\n")
+    done = run("start", worktree, home=lay.home)
+    assert done.stdout == "" and "no longer matches its worktree record" in done.stderr
+
+
+def test_a_record_in_a_writable_directory_is_never_trusted(tmp_path: Path) -> None:
+    """A grant over the record directory lets the sandbox forge the record itself."""
+    lay = Layout(tmp_path)
+    worktree = _linked_worktree(lay)
+    run("start", worktree, home=lay.home)
+    lay.settings({"sandbox": {"filesystem": {"allowWrite": [str(lay.home / ".claude" / "magpie-gateway")]}}})
+    done = run("stop", worktree, home=lay.home)
+    assert done.stdout == "" and "is sandbox-writable" in done.stderr
+
+
+def test_a_writable_record_directory_refuses_even_a_plain_checkout(tmp_path: Path) -> None:
+    """Otherwise deleting the record and the .git file together would skip the check."""
+    lay = Layout(tmp_path)
+    lay.settings({"sandbox": {"filesystem": {"allowWrite": [str(lay.home / ".claude" / "magpie-gateway")]}}})
+    done = run("start", lay.project, home=lay.home)
+    assert done.stdout == "" and "is sandbox-writable" in done.stderr

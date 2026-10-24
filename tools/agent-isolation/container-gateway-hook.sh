@@ -171,7 +171,17 @@ link_stays_inside() {
     local -a parts
     target="$(readlink -- "$link")" || return 1
     if [[ $target == /* ]]; then cur=""; else cur="$(dirname -- "$link")"; fi
-    IFS=/ read -r -a parts <<< "$target"
+    # Split without a here-string: bash 3.2 backs `<<<` with a temporary file,
+    # and when it cannot create one `read` gets nothing, the loop never runs,
+    # and the link would pass as staying inside. Plain word splitting with
+    # globbing off needs no file.
+    local saved_ifs="$IFS"
+    IFS=/
+    set -f
+    # shellcheck disable=SC2206  # splitting on / is the point; globbing is off
+    parts=($target)
+    set +f
+    IFS="$saved_ifs"
     for part in ${parts[@]+"${parts[@]}"}; do
         case "$part" in
             ""|.) continue ;;
@@ -254,7 +264,9 @@ uv_python_dir="$HOME/.local/share/uv/python"
 # the worktree, so the main checkout counts only when its
 # `worktrees/<name>/gitdir` points back here; otherwise the hook refuses.
 main_root=""
+linked_worktree=0
 if [[ -f $root/.git ]]; then
+    linked_worktree=1
     git_dir="$(git -C "$root" rev-parse --absolute-git-dir 2>/dev/null || true)"
     common_dir="$(git -C "$root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
     # The git dir must be exactly <common>/worktrees/<name>, and the back-pointer
@@ -382,6 +394,57 @@ tree_is_trusted() {
     return 0
 }
 
+# A linked worktree's main checkout is re-derived on every run from `.git`
+# metadata the sandbox can rewrite, so a session could hide the main
+# checkout's grants from the run at its end. The first main checkout this hook
+# confirms for a worktree is recorded where the sandbox cannot write
+# (trust on first use); a later run that derives a different one refuses
+# until the operator deletes the record.
+# Under the account database's home, not $HOME: a $HOME redirected by the
+# environment would otherwise hand the hook a fresh, empty record store.
+# $MAGPIE_CONTAINER_GATEWAY_STATE_DIR replaces it only in a dry run, which
+# executes nothing, so the environment never picks the store a real run trusts;
+# it keeps the test suite out of the real account home.
+record_home="${account_home:-$HOME}"
+state_root="$record_home/.claude/magpie-gateway"
+if [[ -n ${MAGPIE_CONTAINER_GATEWAY_DRY_RUN:-} && -n ${MAGPIE_CONTAINER_GATEWAY_STATE_DIR:-} ]]; then
+    state_root="$MAGPIE_CONTAINER_GATEWAY_STATE_DIR"
+fi
+state_dir="$state_root/worktrees"
+if command -v sha256sum >/dev/null 2>&1; then
+    key="$(printf '%s' "$root" | sha256sum | cut -d' ' -f1)"
+else
+    key="$(printf '%s' "$root" | shasum -a 256 | cut -d' ' -f1)"
+fi
+record="$state_dir/$key"
+# A record is only as good as its directory: one the sandbox can write proves
+# nothing, and could have been emptied along with the worktree's .git file, so
+# it refuses for every checkout, before any record is read or trusted.
+if under_writable_root "$state_dir" || overlaps_writable "$state_root"; then
+    log "the worktree record directory $state_dir is sandbox-writable; not starting the container gateway for $root"
+    exit 0
+fi
+# Looked up by path whether or not the checkout looks linked now: swapping the
+# worktree's `.git` file for a directory must not make the record disappear.
+if [[ -L $record ]]; then
+    log "the worktree record $record is a symlink; not starting the container gateway"
+    exit 0
+fi
+if [[ -f $record ]]; then
+    recorded_root="" recorded_main=""
+    { IFS= read -r recorded_root; IFS= read -r recorded_main; } < "$record" || true
+    if [[ $recorded_root != "$root" || $linked_worktree -eq 0 || $recorded_main != "$main_root" ]]; then
+        log "$root no longer matches its worktree record (main checkout '${recorded_main:-none}'); not starting the container gateway (delete $record if the change is yours)"
+        exit 0
+    fi
+elif (( linked_worktree )); then
+    # Only directories this hook creates get their mode set.
+    [[ -d $state_root ]] || mkdir -m 700 "$state_root" 2>/dev/null
+    [[ -d $state_dir ]] || mkdir -m 700 "$state_dir" 2>/dev/null
+    tmp_record="$(mktemp "$state_dir/.record.XXXXXX" 2>/dev/null)" \
+        && printf '%s\n%s\n' "$root" "$main_root" > "$tmp_record" \
+        && mv -f "$tmp_record" "$record"
+fi
 src=""
 for candidate in "${MAGPIE_CONTAINER_GATEWAY_SRC:-}" \
                  "$HOME/.claude/scripts/container-gateway/src"; do
