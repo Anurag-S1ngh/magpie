@@ -17,7 +17,7 @@ when_to_use: >-
 capability: capability:platform
 surface_hash: sha256:6358702510d21c26
 license: Apache-2.0
-measured_tokens: 7894
+measured_tokens: 8036
 ---
 
 <!-- Placeholder convention (see AGENTS.md#placeholder-convention-used-in-skill-files):
@@ -490,6 +490,15 @@ can write:
   `Read(~/.config/uv/uv.toml)` and `Edit(~/.config/uv/**)` (both in the
   framework's `.claude/settings.json`, so Step 2's copy brings them). Sandboxed
   uv then keeps its default, writable cache.
+
+- **Sandboxed prek gets its own home.** The settings carry
+  `"env": {"PREK_HOME": "~/.cache/prek-sandbox"}` and `permissions.deny`
+  carries `Edit(~/.cache/prek/**)` (both in the framework's
+  `.claude/settings.json`): a terminal's git hooks run prek outside the
+  sandbox from `~/.cache/prek`. The whole-user dispatcher (Step P) gives hooks
+  that Claude Code runs outside the sandbox a host-only home and cache root
+  too; if a repository sets its own `core.hooksPath`, propose unsetting it so
+  the dispatcher runs there.
 
 Then hand the operator the reinstall commands from the doc to run in a
 terminal: interpreters and tools the sandbox could write before may already
