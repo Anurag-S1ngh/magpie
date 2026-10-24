@@ -74,14 +74,30 @@ fi
 
 # Once per session, the isolated-setup warning: `setup_preflight` decides
 # whether it applies and prints the notice with it, as hook JSON whose
-# `systemMessage` the user sees. Without python3 the notice goes out alone.
-# `-P` keeps the working directory, which is the project being opened, off
-# `sys.path`: `python3 -m` would otherwise put it ahead of `PYTHONPATH`, and
-# a `setup_preflight/` package committed to that project would run in place
-# of the plugin's own.
+# `systemMessage` the user sees. Without a usable Python the notice goes out
+# alone.
+#
+# The hook runs outside the sandbox, so the interpreter is never `python3`
+# from PATH, which project settings can set: only fixed system and Homebrew
+# locations, which no sandbox grant may cover (the container-gateway hook
+# refuses to run at all when one does). uv-managed interpreters are left out:
+# trusting them needs the gateway hook's full writable-root checks, and this
+# hook only prints a notice, so without a system Python it prints its own.
+# It runs with `-I -S`, so no PYTHON* variable, site-packages or working
+# directory (the project being opened, which could carry its own
+# `setup_preflight/`) reaches `sys.path`; a one-line bootstrap puts the
+# plugin's own source there. `setup_preflight` needs only the stdlib.
+python=""
+for candidate in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+  [ -x "$candidate" ] || continue
+  "$candidate" -I -S -c 'import sys; sys.exit(sys.version_info < (3, 11))' >/dev/null 2>&1 || continue
+  python="$candidate"
+  break
+done
 output="$notice"
-if command -v python3 >/dev/null 2>&1; then
-  output="$(PYTHONPATH="$root/skills/setup" python3 -P -m setup_preflight.isolated session-start \
+if [ -n "$python" ]; then
+  bootstrap='import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); runpy.run_module("setup_preflight.isolated", run_name="__main__", alter_sys=True)'
+  output="$("$python" -I -S -c "$bootstrap" "$root/skills/setup" session-start \
     --project-root "${CLAUDE_PROJECT_DIR:-$PWD}" --notice "$notice" 2>/dev/null)" || output="$notice"
 fi
 
