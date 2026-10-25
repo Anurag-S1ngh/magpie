@@ -53,7 +53,7 @@ Magpie**. The [pinned snapshot install](../quick-start/other-install-methods.md)
 for the cases it does not cover.
 
 > [!IMPORTANT]
-> A marketplace install drops the 82 skills into your agent and is complete
+> A marketplace install drops the 83 skills into your agent and is complete
 > for day-to-day use. What it does **not** set up on its own is the
 > repo-side machinery — the committed pin, the gitignored snapshot, drift
 > detection, agentic overrides — or the secure-agent setup, which you run
@@ -168,7 +168,7 @@ can say so, because it is the floor everything else is managed from.
 | Family plugin | Skills | ~Always-on tokens |
 |---|---|---|
 | `magpie-security` | 16 | ~1.2k |
-| `magpie-setup` | 11 | ~0.8k |
+| `magpie-setup` | 12 | ~0.8k |
 | `magpie-release-management` | 10 | ~0.8k |
 | `magpie-pr-management` | 9 | ~1.0k |
 | `magpie-issue` | 8 | ~0.7k |
@@ -310,7 +310,7 @@ Adding the marketplace clones the repo and reads
 **Updating** is `/plugin marketplace update apache-magpie` followed by
 `/plugin update magpie-<family>@apache-magpie` for each family you installed.
 On a version change the `magpie-setup` plugin's bundled `SessionStart` hook
-also prompts you to run `/magpie-setup:setup upgrade`.
+also prompts you to run `/magpie-setup:complete-upgrade`.
 
 Adding the marketplace from a tag rather than untagged pins which version the
 install tracks — see [Versioning](#versioning).
@@ -409,7 +409,7 @@ The install reads `gemini-extension.json` and auto-discovers the skills under
 name.
 
 Gemini has no lifecycle hook, so the shipped
-[`GEMINI.md`](../../GEMINI.md) reminds you to run `/magpie-setup:setup upgrade` when
+[`GEMINI.md`](../../GEMINI.md) reminds you to run `/magpie-setup:complete-upgrade` when
 the version changes.
 
 ### Cursor
@@ -601,8 +601,8 @@ Contributors keep the last word: a plugin enabled this way still appears in
 ## Automatic upgrade detection
 
 When the marketplace updates the plugin to a new version, Magpie prompts you
-to run **`/magpie-setup upgrade`** — which reconciles the gitignored snapshot,
-the agentic overrides, and drift. This is **detect-and-prompt, not auto-run**:
+to run **`/magpie-setup:complete-upgrade`** — which checks this machine and this
+project against the new version and applies the fixes you approve. This is **detect-and-prompt, not auto-run**:
 a plugin hook cannot invoke a slash command, and Magpie never mutates an
 adopter repo without the guided skill's confirmation, so the *trigger* is
 automatic while the *changes* stay confirmed.
@@ -611,9 +611,9 @@ automatic while the *changes* stay confirmed.
 |---|---|
 | **Claude Code** | `SessionStart` hook [`plugins/magpie-setup/hooks/check-upgrade.sh`](../../plugins/magpie-setup/hooks/check-upgrade.sh) compares the installed version to a marker in the plugin's persistent data dir and prompts on change. Deterministic. |
 | **Codex CLI** | The same [`plugins/magpie-setup/hooks/check-upgrade.sh`](../../plugins/magpie-setup/hooks/check-upgrade.sh), wired inline via the plugin's `hooks` block — Codex uses the same event schema and the same `SessionStart` event. Codex sets `PLUGIN_ROOT`/`PLUGIN_DATA` (and the `CLAUDE_*` pair for compatibility), which the script reads. See the caveat below. |
-| **VS Code / Copilot, Cursor, Kiro (AP1)** | None. Agent Plugins 1.0 specifies no hook component and VS Code ignores client extension directories, so there is nothing to fire. Re-run `/magpie-setup:setup upgrade` after updating. |
+| **VS Code / Copilot, Cursor, Kiro (AP1)** | None. Agent Plugins 1.0 specifies no hook component and VS Code ignores client extension directories, so there is nothing to fire. Run `/magpie-setup:complete-upgrade` after updating. |
 | **Gemini CLI** | No lifecycle hook; the extension context file [`GEMINI.md`](../../GEMINI.md) instructs the agent to compare the extension version to a recorded marker and prompt on change (LLM-driven, advisory). |
-| Other agents | Re-run `/magpie-setup:setup upgrade` manually after updating the package. |
+| Other agents | Run `/magpie-setup:complete-upgrade` manually after updating the package. |
 
 > [!IMPORTANT]
 > **Codex hooks require a separate trust decision.** Current Codex supports plugin-local hooks, but skips non-managed definitions until the operator reviews them in `/hooks`.
