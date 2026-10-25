@@ -15,15 +15,22 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# container-gateway-hook.sh — Claude Code SessionStart / SessionEnd hook.
+# container-gateway-hook.sh — Claude Code SessionStart / SessionEnd / PreToolUse hook.
 #
 # Starts the per-project container gateway when a session begins and stops
 # it when the session ends, so sandboxed podman / docker commands have a
-# socket to talk to. Runs outside the sandbox, like every hook. Never fails
-# the session: every exit is 0, and a missing gateway is silently a no-op.
+# socket to talk to, and starts it again before a container command when it
+# is gone mid-session: it exits after its idle timeout, when another session
+# on the same project ends, or when it or its backend dies. Runs outside the
+# sandbox, like every hook. Never fails the session or blocks a command: every
+# exit is 0, and a missing gateway is silently a no-op.
 #
 #   start   SessionStart — <python> -I container_gateway serve --project=<root> --daemon
 #   stop    SessionEnd   — <python> -I container_gateway stop  --project=<root>
+#   ensure  PreToolUse (Bash) — as start, but only when the command names
+#           docker or podman and the gateway is not running; waits briefly for
+#           its sockets so the command does not race the start. It judges
+#           $CLAUDE_PROJECT_DIR, never the payload's cwd (see below).
 #
 # Trust model: the hook runs outside the sandbox, so everything it executes --
 # the interpreter, the standard library under it, and the gateway source -- must
@@ -79,6 +86,22 @@
 #   counts as well: its .cache, its .local and its user settings, even when
 #   $HOME names another directory.
 #
+#   Which project is judged. The session's write grants come from the project
+#   the session started in, so that is the directory every check must start
+#   from. The payload's cwd is that directory only when a session first
+#   starts: before a tool call, and at the SessionStart that follows a
+#   compaction, /clear or resume, it has followed the agent's `cd`, and judged
+#   from another directory the session project's grants would go uncounted,
+#   letting a sandboxed `cd` elsewhere pass a source the sandbox can write as
+#   trusted. Every action therefore takes the directory from
+#   $CLAUDE_PROJECT_DIR, which Claude Code sets on every hook it spawns to the
+#   directory the session started in. It does not follow `cd`, and an `env`
+#   entry in settings does not override it (checked against Claude Code: a
+#   setting CLAUDE_PROJECT_DIR=/elsewhere still hands hooks the real
+#   directory). When it is unset or relative, `start` and `stop` fall back to
+#   the payload's cwd and `ensure` does nothing. The payload's cwd, with its
+#   settings, is counted as writable as well.
+#
 #   Bash itself reads the environment before this script runs: $BASH_ENV (a
 #   file it executes), exported functions (BASH_FUNC_git%%=... would replace
 #   git) and SHELLOPTS / BASHOPTS. The shebang's -p (privileged mode) turns all
@@ -90,9 +113,10 @@
 #   then run another script entirely.
 #
 #   Known gap: write grants given only on the command line (--add-dir, a
-#   --settings file) are invisible to a hook. They come from whoever launches
-#   the session, not from the repository; do not grant a directory that holds the
-#   gateway source or the pinned interpreter that way.
+#   --settings file) or mid-session without saving them to settings (/add-dir)
+#   are invisible to a hook. They come from whoever runs the session, not from
+#   the repository; do not grant a directory that holds the gateway source or
+#   the pinned interpreter that way.
 #
 # MAGPIE_CONTAINER_GATEWAY_DRY_RUN=1 prints the command instead of running it.
 
@@ -108,8 +132,8 @@ export PATH
 
 action="${1:-}"
 case "$action" in
-    start|stop) ;;
-    *) printf '%s: expected start|stop, got "%s"\n' "${0##*/}" "$action" >&2; exit 0 ;;
+    start|stop|ensure) ;;
+    *) printf '%s: expected start|stop|ensure, got "%s"\n' "${0##*/}" "$action" >&2; exit 0 ;;
 esac
 
 # Project settings can set the session's environment: no GIT_* variable may
@@ -125,9 +149,30 @@ log() { printf '%s: %s\n' "${0##*/}" "$*" >&2; }
 git() { command git -c safe.bareRepository=explicit "$@"; }
 
 payload="$(cat 2>/dev/null || true)"
-cwd="$(printf '%s' "$payload" | jq -r '.cwd // empty' 2>/dev/null || true)"
-[[ -n $cwd ]] || cwd="$PWD"
+# `ensure` runs before every Bash command the hook's `if` filter lets through,
+# and that filter is best-effort: anything not naming docker or podman leaves
+# here, before any of the checks below. The word may follow a path or an
+# operator (`/usr/local/bin/docker`, `cd x && podman run`).
+if [[ $action == ensure ]]; then
+    command_line="$(printf '%s' "$payload" | jq -r '.tool_input.command // empty' 2>/dev/null || true)"
+    container_word='(^|[^A-Za-z0-9_.-])(docker|podman)(-compose)?([^A-Za-z0-9_.-]|$)'
+    [[ $command_line =~ $container_word ]] || exit 0
+fi
+# The session's own project, never the payload's cwd (see the header).
+# SessionStart also fires after a compaction, /clear or a resume, when the
+# payload's cwd has followed the agent's `cd` too, so `start` and `stop` take
+# CLAUDE_PROJECT_DIR as well and fall back to the payload only when it is
+# unset; `ensure` has no fallback.
+payload_cwd="$(printf '%s' "$payload" | jq -r '.cwd // empty' 2>/dev/null || true)"
+cwd="${CLAUDE_PROJECT_DIR:-}"
+if [[ $cwd != /* ]]; then
+    [[ $action == ensure ]] && exit 0
+    cwd="${payload_cwd:-$PWD}"
+fi
 cwd="$(cd "$cwd" 2>/dev/null && pwd -P)" || exit 0
+# The directory the agent is in is sandbox-writable too, with any settings it
+# holds; counted as well, it can only refuse more.
+payload_cwd="$(cd "${payload_cwd:-$cwd}" 2>/dev/null && pwd -P)" || payload_cwd="$cwd"
 root="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$cwd")"
 root="$(cd "$root" 2>/dev/null && pwd -P)" || exit 0
 # The session's cwd is sandbox-writable whatever git says; a toplevel elsewhere
@@ -269,7 +314,7 @@ normalize_entry() {
     done
 }
 
-writable_roots=("$root" "$cwd")
+writable_roots=("$root" "$cwd" "$payload_cwd")
 # ~/.local is refused too, all but uv's managed interpreters (see the header);
 # kept out of writable_roots so a settings grant over them still counts in full.
 # Both homes count: the one $HOME names and the account database's.
@@ -324,6 +369,8 @@ for home in "${homes[@]}"; do
 done
 settings_specs+=("$root/.claude/settings.json|$root" "$root/.claude/settings.local.json|$root")
 [[ $cwd != "$root" ]] && settings_specs+=("$cwd/.claude/settings.json|$cwd" "$cwd/.claude/settings.local.json|$cwd")
+[[ $payload_cwd != "$root" && $payload_cwd != "$cwd" ]] \
+    && settings_specs+=("$payload_cwd/.claude/settings.json|$payload_cwd" "$payload_cwd/.claude/settings.local.json|$payload_cwd")
 if [[ -n $main_root ]]; then
     writable_roots+=("$main_root")
     settings_specs+=("$main_root/.claude/settings.json|$main_root"
@@ -601,7 +648,7 @@ vet_extra_args() {
     printf '%s\n' "$@"
 }
 
-if [[ $action == start ]]; then
+if [[ $action == start || $action == ensure ]]; then
     # shellcheck disable=SC2206  # word-splitting the extra args is the point
     extra=(${MAGPIE_CONTAINER_GATEWAY_ARGS:-})
     if (( ${#extra[@]} )) && ! vet_extra_args ${extra[@]+"${extra[@]}"} >/dev/null; then
@@ -623,5 +670,23 @@ fi
 # sys.path, -S every site-packages directory; the bootstrap puts the vetted
 # source directory there and nothing else.
 bootstrap='import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); runpy.run_module("container_gateway", run_name="__main__", alter_sys=True)'
-"$python" -I -S -c "$bootstrap" "$src" "${args[@]}" >/dev/null 2>&1 || true
+
+# The gateway's own pid-lock probe: true once it serves, since it binds its
+# sockets before it writes the pid file.
+gateway_running() {
+    "$python" -I -S -c "$bootstrap" "$src" status --project="$root" 2>/dev/null \
+        | jq -e '.running == true' >/dev/null 2>&1
+}
+
+# Running already is the common case for `ensure`: one interpreter start.
+[[ $action == ensure ]] && gateway_running && exit 0
+"$python" -I -S -c "$bootstrap" "$src" "${args[@]}" >/dev/null 2>&1 || exit 0
+if [[ $action == ensure ]]; then
+    # --daemon returns before the sockets are bound; give the gateway up to
+    # five seconds so the command that triggered this does not race it.
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25; do
+        gateway_running && break
+        sleep 0.2
+    done
+fi
 exit 0
