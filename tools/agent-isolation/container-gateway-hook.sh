@@ -120,6 +120,10 @@ done
 
 log() { printf '%s: %s\n' "${0##*/}" "$*" >&2; }
 
+# Every git call: never discover a bare repository, which sandboxed code could
+# plant as HEAD / config / objects in a project that has no .git of its own.
+git() { command git -c safe.bareRepository=explicit "$@"; }
+
 payload="$(cat 2>/dev/null || true)"
 cwd="$(printf '%s' "$payload" | jq -r '.cwd // empty' 2>/dev/null || true)"
 [[ -n $cwd ]] || cwd="$PWD"
@@ -130,6 +134,36 @@ root="$(cd "$root" 2>/dev/null && pwd -P)" || exit 0
 # (core.worktree in a writable .git/config) would leave it uncounted.
 if [[ $cwd != "$root" && $cwd != "$root"/* ]]; then
     log "git reports $root as the toplevel of $cwd, which it does not contain; not starting the container gateway"
+    exit 0
+fi
+# The root as the filesystem shows it, read without any repository config: the
+# nearest directory above the cwd holding a .git. git's toplevel must be that
+# directory, and core.worktree must be unset: a .git directory planted in a
+# sandbox-writable checkout could otherwise name a parent as the toplevel, which
+# still contains the cwd but keys the worktree records differently, so an
+# existing record would never be consulted.
+fs_root=""
+probe_dir="$cwd"
+while :; do
+    if [[ -e $probe_dir/.git || -L $probe_dir/.git ]]; then
+        fs_root="$probe_dir"
+        break
+    fi
+    [[ $probe_dir == / ]] && break
+    probe_dir="$(dirname -- "$probe_dir")"
+done
+git_toplevel="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -z $fs_root && -n $git_toplevel ]]; then
+    log "git finds a repository for $cwd but there is no .git on the way up; not starting the container gateway"
+    exit 0
+fi
+if [[ -n $fs_root && $fs_root != "$root" ]]; then
+    log "git reports $root as the toplevel of $cwd, but the checkout is $fs_root; not starting the container gateway"
+    exit 0
+fi
+# Checked whether or not a .git was found: core.worktree is what moves a toplevel.
+if [[ -n "$(git -C "$cwd" config --get core.worktree 2>/dev/null)" ]]; then
+    log "core.worktree is set for $cwd; not starting the container gateway"
     exit 0
 fi
 

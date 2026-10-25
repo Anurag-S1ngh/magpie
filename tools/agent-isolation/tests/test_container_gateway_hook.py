@@ -782,3 +782,42 @@ def test_a_writable_record_directory_refuses_even_a_plain_checkout(tmp_path: Pat
     lay.settings({"sandbox": {"filesystem": {"allowWrite": [str(lay.home / ".claude" / "magpie-gateway")]}}})
     done = run("start", lay.project, home=lay.home)
     assert done.stdout == "" and "is sandbox-writable" in done.stderr
+
+
+
+def test_a_planted_core_worktree_cannot_move_the_record_key(tmp_path: Path) -> None:
+    """A fake .git naming a parent as the toplevel still contains the cwd, but would
+    key the worktree records differently and skip the existing one."""
+    lay = Layout(tmp_path)
+    worktree = _linked_worktree(lay)
+    run("start", worktree, home=lay.home)
+    # A plain .git directory (so the checkout no longer looks linked) whose config
+    # names the parent as the work tree: git's toplevel then contains the cwd.
+    (worktree / ".git").unlink()
+    subprocess.run(["git", "init", "-q", str(worktree)], check=True)
+    subprocess.run(["git", "-C", str(worktree), "config", "core.worktree", str(lay.base)], check=True)
+    done = run("stop", worktree, home=lay.home)
+    assert done.stdout == ""
+    assert "but the checkout is" in done.stderr
+
+
+def test_core_worktree_on_a_plain_checkout_refuses(tmp_path: Path) -> None:
+    lay = Layout(tmp_path)
+    subprocess.run(["git", "-C", str(lay.project), "config", "core.worktree", str(lay.project)], check=True)
+    done = run("start", lay.project, home=lay.home)
+    assert done.stdout == "" and "core.worktree is set" in done.stderr
+
+
+def test_a_planted_bare_repository_is_not_discovered(tmp_path: Path) -> None:
+    """In a project with no .git, HEAD / config / objects planted in the cwd would make
+    git treat it as a bare repository whose core.worktree names a parent."""
+    lay = Layout(tmp_path)
+    plain = lay.base / "plain"
+    plain.mkdir()
+    subprocess.run(["git", "init", "-q", "--bare", str(plain)], check=True)
+    subprocess.run(["git", "--git-dir", str(plain), "config", "core.worktree", str(lay.base)], check=True)
+    subprocess.run(["git", "--git-dir", str(plain), "config", "core.bare", "false"], check=True)
+    done = run("start", plain, home=lay.home)
+    # Either refused, or served for the directory itself: never for the parent.
+    assert done.stdout == "" or f"--project={plain.resolve()} " in done.stdout
+    assert f"--project={lay.base} " not in done.stdout
