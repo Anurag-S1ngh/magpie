@@ -15,9 +15,9 @@ when_to_use: >-
   If it is already installed, use `setup-isolated-setup-verify` to check
   it or `setup-isolated-setup-update` to refresh it.
 capability: capability:platform
-surface_hash: sha256:6358702510d21c26
+surface_hash: sha256:d33e1ff373860d4b
 license: Apache-2.0
-measured_tokens: 8036
+measured_tokens: 8116
 ---
 
 <!-- Placeholder convention (see AGENTS.md#placeholder-convention-used-in-skill-files):
@@ -491,7 +491,11 @@ can write:
   framework's `.claude/settings.json`, so Step 2's copy brings them). Sandboxed
   uv then keeps its default, writable cache.
 
-- **Sandboxed prek gets its own home.** The settings carry
+- **Sandboxed prek gets its own home.** The `env` entry is needed only where a
+  repository uses prek (a `prek.toml`, `.pre-commit-config.yaml` or
+  `.pre-commit-config.yml`, or a hook that runs it:
+  [detection](../../../../tools/hook-manager/README.md#detection)); the deny
+  is always kept, since the default home is per-user. The settings carry
   `"env": {"PREK_HOME": "~/.cache/prek-sandbox"}` and `permissions.deny`
   carries `Edit(~/.cache/prek/**)` (both in the framework's
   `.claude/settings.json`): a terminal's git hooks run prek outside the
