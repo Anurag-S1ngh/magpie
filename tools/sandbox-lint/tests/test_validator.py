@@ -20,6 +20,7 @@ from __future__ import annotations
 import copy
 import fnmatch
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -973,3 +974,106 @@ def test_the_default_prek_home_is_denied_even_without_prek(baseline: dict[str, A
     settings["permissions"]["deny"].remove("Edit(~/.cache/prek/**)")
     errors = check_invariants(settings, project_root=_git_repo(tmp_path / "r"))
     assert "permissions.deny: must contain 'Edit(~/.cache/prek/**)'" in errors, errors
+
+
+# ---------------------------------------------------------------------------
+# allowAllUnixSockets lifts the Linux seccomp AF_UNIX block, so any socket the
+# sandbox can see becomes connectable; denyRead must hide the host daemons and
+# the per-user runtime directory.
+# ---------------------------------------------------------------------------
+
+_HOST_SOCKETS = [
+    "/run/docker.sock",
+    "/var/run/docker.sock",
+    "/run/docker-cli.sock",
+    "/run/podman",
+    "/run/user/<uid>",
+    "/run/dbus",
+    "/tmp/.X11-unix",
+    "/run/WSL",
+    "/mnt/wslg",
+]
+_UID = os.getuid()
+
+
+def _all_unix_sockets(baseline: dict[str, Any], deny: list[str]) -> dict[str, Any]:
+    settings = copy.deepcopy(baseline)
+    settings["sandbox"]["network"]["allowAllUnixSockets"] = True
+    settings["sandbox"]["filesystem"]["denyRead"] += deny
+    return settings
+
+
+def _flagged_sockets(settings: dict[str, Any]) -> set[str]:
+    errors = check_invariants(settings)
+    return {e.split(" connect to ")[1].split(";")[0] for e in errors if "allowAllUnixSockets" in e}
+
+
+def test_all_unix_sockets_without_socket_denies_is_rejected(baseline: dict[str, Any]) -> None:
+    assert _flagged_sockets(_all_unix_sockets(baseline, [])) == set(_HOST_SOCKETS)
+
+
+@pytest.mark.parametrize("user_deny", [f"/run/user/{_UID}", f"/run/user/{_UID}/", "/run/user/*", "/run/user"])
+def test_all_unix_sockets_with_socket_denies_passes(baseline: dict[str, Any], user_deny: str) -> None:
+    others = [p for p in _HOST_SOCKETS if "<uid>" not in p]
+    assert _flagged_sockets(_all_unix_sockets(baseline, [*others, user_deny])) == set()
+
+
+@pytest.mark.parametrize(
+    "user_deny",
+    [
+        [f"/run/user/{_UID + 1}"],
+        # The systemd user manager also listens on systemd/private, and the
+        # directory holds askpass and agent sockets.
+        [f"/run/user/{_UID}/bus", f"/run/user/{_UID}/podman"],
+    ],
+)
+def test_user_runtime_dir_needs_the_whole_dir_of_this_uid(
+    baseline: dict[str, Any], user_deny: list[str]
+) -> None:
+    others = [p for p in _HOST_SOCKETS if "<uid>" not in p]
+    assert _flagged_sockets(_all_unix_sockets(baseline, [*others, *user_deny])) == {"/run/user/<uid>"}
+
+
+def test_home_and_relative_deny_entries_cover_no_host_socket(baseline: dict[str, Any]) -> None:
+    deny = ["~/", "~/run/docker.sock", "run/docker.sock", "./run/user"]
+    assert _flagged_sockets(_all_unix_sockets(baseline, deny)) == set(_HOST_SOCKETS)
+
+
+def test_socket_denies_are_not_required_without_all_unix_sockets(baseline: dict[str, Any]) -> None:
+    assert not [e for e in check_invariants(baseline) if "allowAllUnixSockets" in e]
+
+
+@pytest.mark.parametrize(
+    ("read", "write"),
+    [
+        ("/home/u/repos", "/home/u/repos/project"),
+        ("/home/u/repos/", "/home/u/repos/project/"),
+        ("~/repos", "~/repos/project"),
+    ],
+)
+def test_allow_read_parent_of_allow_write_is_rejected(
+    baseline: dict[str, Any], read: str, write: str
+) -> None:
+    # bubblewrap mounts the read-only parent over the writable child.
+    settings = copy.deepcopy(baseline)
+    settings["sandbox"]["filesystem"]["allowRead"] += [read, write]
+    settings["sandbox"]["filesystem"]["allowWrite"] += [write]
+    errors = check_invariants(settings)
+    assert any(f"{read!r} is a parent of the allowWrite entry {write!r}" in e for e in errors), errors
+
+
+def test_allow_read_parent_that_is_itself_writable_passes(baseline: dict[str, Any]) -> None:
+    settings = copy.deepcopy(baseline)
+    settings["sandbox"]["filesystem"]["allowRead"] += ["/home/u/repos", "/home/u/repos/project"]
+    settings["sandbox"]["filesystem"]["allowWrite"] += ["/home/u/repos", "/home/u/repos/project"]
+    assert not [e for e in check_invariants(settings) if "is a parent of the allowWrite" in e]
+
+
+def test_dot_allow_read_over_a_project_subdir_passes(baseline: dict[str, Any], tmp_path: Path) -> None:
+    # "." is the project, which the sandbox always makes writable.
+    settings = copy.deepcopy(baseline)
+    settings["sandbox"]["filesystem"]["allowRead"] += [".", "./build"]
+    settings["sandbox"]["filesystem"]["allowWrite"] += ["./build"]
+    assert not [
+        e for e in check_invariants(settings, project_root=tmp_path) if "is a parent of the allowWrite" in e
+    ]
