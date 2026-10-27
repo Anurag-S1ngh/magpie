@@ -239,7 +239,10 @@ See `docs/adapters/goose.md`.
   naming `git` or `gh` is refused, as is a line whose quoting cannot be
   parsed when it names `git` or `gh` (after removing quotes and
   backslashes, so `g'i't` counts) or holds `$`, a backtick, a glob or
-  brace character or a backslash-newline; a heredoc body is not read as
+  brace character or a backslash-newline, and so is a command that
+  parses but whose name is not literal (letters, digits, `_ . / + : @ % , -`
+  and a leading `~/`; `[` and `[[` aside), and redirections before the
+  command name are skipped like leading assignments; a heredoc body is not read as
   shell syntax unless it names `git` / `gh` and is fed to anything but
   a bare `cat` / `tee` starting its own command, in a command that
   without its heredoc bodies has no `$`, backtick, parenthesis, brace,

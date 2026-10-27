@@ -753,6 +753,96 @@ def test_quoted_heredoc_body_substitution_is_data():
 @pytest.mark.parametrize(
     "command",
     [
+        # The guards cannot see what an expansion or glob in the command name
+        # resolves to, so such a command is refused even when it tokenises.
+        "$CMD push --force",
+        '"$CMD" push --force',
+        "${CMD} push --force",
+        "CMD=git; $CMD push --force",
+        "$(echo git) push --force",
+        "`echo git` push --force",
+        "/usr/bin/gi? push --force",
+        "/usr/bin/g*t push --force",
+        "/usr/bin/g[i]t push --force",
+        "/usr/bin/g{i,}t push --force",
+        "env $CMD push --force",
+        "command $CMD push --force",
+        # zsh expands `=cmd` to the command's path and `(…)` as a glob group.
+        "=git push --force",
+        "/usr/bin/g(i)t push --force",
+        "/usr/bin/gi<-> push --force",
+        "/usr/bin/g^x push --force",
+        "/usr/bin/git~x push --force",
+    ],
+)
+def test_expanded_command_name_is_refused(command):
+    reason = dispatch(command)
+    # `g(i)t` cannot be read as bash at all, so it is refused as unparsable
+    assert reason and ("agent-guard[expansion]" in reason or "agent-guard[parse]" in reason)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "[ -f README.md ]",
+        "[[ -f README.md ]]",
+        "echo $HOME",
+        "ls *.md",
+        "X=$(pwd) ls",
+        "git log --format='%h {x}'",
+        # Literal names: paths, `~/`, and the characters real tools use.
+        "~/.local/bin/uv-tool --version",
+        "./scripts/build.sh",
+        "/usr/bin/git status",
+        "g++ --version",
+        "python3.12 -V",
+        "docker-compose ps",
+    ],
+)
+def test_expansion_outside_the_command_name_allows(command):
+    assert dispatch(command) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # bash allows redirections before the command name; the command after
+        # them is the one that runs.
+        f">/dev/null {_TRAILER_COMMIT}",
+        f"> /dev/null {_TRAILER_COMMIT}",
+        f"2>&1 {_TRAILER_COMMIT}",
+        f"</dev/null {_TRAILER_COMMIT}",
+        f"&>>log {_TRAILER_COMMIT}",
+        f"X=1 2>/dev/null {_TRAILER_COMMIT}",
+        f"{{fd}}>log {_TRAILER_COMMIT}",
+        f"nohup >log env {_TRAILER_COMMIT}",
+        # A detached target after `>&` / `N>&` / `<&` is the next word.
+        f">& /dev/null {_TRAILER_COMMIT}",
+        f"2>& /dev/null {_TRAILER_COMMIT}",
+        f"<& 0 {_TRAILER_COMMIT}",
+        f"&> /dev/null {_TRAILER_COMMIT}",
+        f">| /dev/null {_TRAILER_COMMIT}",
+    ],
+)
+def test_command_after_leading_redirections_is_checked(command):
+    reason = dispatch(command)
+    assert reason and "Co-Authored-By" in reason
+
+
+def test_wrappers_and_redirections_past_the_limit_are_refused():
+    command = "nohup >log " * 80 + _TRAILER_COMMIT
+    reason = dispatch(command)
+    assert reason and "agent-guard[wrapper]" in reason
+
+
+@pytest.mark.parametrize("command", ["exec 3>&1", "2>/dev/null git status", ">out.txt echo hi"])
+def test_leading_redirections_on_a_clean_command_allow(command):
+    assert dispatch(command) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
         # `<<` as a shift operator opens no heredoc.
         f"cat /dev/null $((1<<x)) # it's\n{_TRAILER_COMMIT}\nx",
         f"cat /dev/null $[1<<x] # it's\n{_TRAILER_COMMIT}\nx",
