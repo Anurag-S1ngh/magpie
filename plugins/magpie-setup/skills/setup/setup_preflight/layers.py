@@ -43,9 +43,13 @@ user can move it.
 Nothing here creates a directory.  A read that created the personal layer
 would fake the "configured" state the pre-flight reads from its presence.
 
-The pre-flight checker itself is not installed in the personal layer but in
-`checker_home`: inside the VCS's own directory in every case, so that no
-committed file can ever be imported as the checker.
+The pre-flight checker itself is not installed in the personal layer but
+under `checker_home`, a per-user directory outside every project, so that
+nothing the opened tree carries, its `.git/` and `.svn/` included, is ever
+imported as the checker.  A checker copied from a framework outside the
+project goes in `checker_home` itself and serves every project; one copied
+from inside the project (a pinned snapshot) goes in that project's own
+`project_checker_home` and serves only it (`checker_install_dir`).
 
 Run as a module it prints where each layer is, for a skill that has to
 write the personal layer rather than read it:
@@ -61,6 +65,7 @@ of `git_common_dir` and the same test vectors; keep them in step.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -171,27 +176,116 @@ def unadopted_home(root: Path) -> Path:
     return root / LOCAL_DIR
 
 
-def checker_home(root: Path) -> Path | None:
-    """Where the pre-flight checker is installed and imported from, or `None`.
+CHECKER_HOME = Path(".cache") / "apache-magpie" / "preflight"
 
-    `<git-common-dir>/apache-magpie` in a git repository, else
-    `<.svn>/apache-magpie` in a Subversion working copy — adopted or not.
-    Both are inside the VCS's own directory, which no commit can carry, so
-    opening a repository is never enough to put code on the checker's import
-    path.  Every path a repository *can* commit is left out on purpose: the
-    working tree (`python3 -P`), an adopted repository's gitignored
-    `.apache-magpie-local/` (a repository can still force-add it), and the
-    legacy in-tree directory of an unadopted one.  With no version control
-    there is no such directory, so there is no checker and skills resolve
-    their configuration by hand.
+
+def checker_home() -> Path:
+    """Where the pre-flight checker is installed and imported from: `~/.cache/apache-magpie/preflight`.
+
+    One per-user directory, outside every project.  A directory inside the
+    opened tree is never safe to import from, even the VCS's own: Subversion
+    versions a `.git/` like any other directory, and a tarball can carry a
+    `.git/` or a `.svn/` (with its `wc.db`) that `git` and this module accept
+    as real.  So the checker does not depend on which project is open, or on
+    whether it has version control at all.  The block names the same path as
+    `$HOME/.cache/apache-magpie/preflight`.
     """
-    common = git_common_dir(root)
-    if common is not None:
-        return common / GIT_HOME_NAME
-    svn = svn_admin_dir(root)
-    if svn is not None:
-        return svn / GIT_HOME_NAME
-    return None
+    return Path.home() / CHECKER_HOME
+
+
+def project_key(root: Path) -> str:
+    """The project's key under `checker_home() / "projects"`: its resolved path, hashed.
+
+    The block computes the same value inline, as
+    `hashlib.sha256(os.path.realpath(os.curdir).encode()).hexdigest()[:16]`.
+    """
+    return hashlib.sha256(os.path.realpath(root).encode()).hexdigest()[:16]
+
+
+def project_checker_home(root: Path) -> Path:
+    """Where a checker copied from inside `root` is installed: for `root` alone."""
+    return checker_home() / "projects" / project_key(root)
+
+
+ROOT_ID_NAME = "root-id"
+
+# Where an installed framework lives, relative to the user's home: the
+# harnesses' plugin installs, and the framework copy the session hook
+# materialises.  Nothing a project carries resolves under these.
+FRAMEWORK_ROOTS = (
+    Path(".claude") / "plugins" / "cache" / "apache-magpie",
+    Path(".agents") / "plugins" / "magpie",
+    Path(".gemini") / "config" / "plugins",
+    Path(".cache") / "apache-magpie" / "framework",
+)
+
+
+def framework_roots() -> list[Path]:
+    """The known framework locations under this user's home, unresolved."""
+    return [Path.home() / relative for relative in FRAMEWORK_ROOTS]
+
+
+def _inside(path: str, root: str) -> bool:
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def checker_install_dir(root: Path, source: Path) -> Path:
+    """Where `config` or `upgrade` may install a checker copied from `source`.
+
+    The shared `checker_home` serves every project, so it takes a copy only
+    from a known framework location (`framework_roots`): a harness's plugin
+    install, or the framework copy under `~/.cache/apache-magpie/framework/`.
+    Anything else — a pinned snapshot inside the project, which a tarball can
+    carry too, or any other directory — goes to `project_checker_home(root)`
+    and serves that project alone, so a crafted tree reaches no other
+    project.  Both sides are resolved first, so a link under a known root
+    that points elsewhere does not count; and a source that resolves inside
+    the project never qualifies, even through a known root that is itself a
+    link into it.
+    """
+    resolved = os.path.realpath(source)
+    if _inside(resolved, os.path.realpath(root)):
+        return project_checker_home(root)
+    if any(_inside(resolved, os.path.realpath(known)) for known in framework_roots()):
+        return checker_home()
+    return project_checker_home(root)
+
+
+def _root_identity(root: Path) -> str:
+    st = os.stat(os.path.realpath(root))
+    return f"{st.st_dev} {st.st_ino}"
+
+
+def record_root_identity(root: Path) -> Path:
+    """Record `root`'s identity beside its per-project install; returns the file.
+
+    The key is the root's path, which outlives the project: a different tree
+    created later at the same path would otherwise import the old install.
+    The block and `import_dir` use the per-project copy only while the
+    identity (`st_dev`, `st_ino` of the resolved root) still matches.
+    """
+    own = project_checker_home(root)
+    own.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = own / ROOT_ID_NAME
+    path.write_text(_root_identity(root) + "\n", encoding="utf-8")
+    return path
+
+
+def import_dir(root: Path) -> Path:
+    """The directory the block puts on `PYTHONPATH` in `root`.
+
+    The project's own when it holds a checker installed for this very tree
+    (its recorded identity matches), else the shared one.
+    """
+    own = project_checker_home(root)
+    recorded = own / ROOT_ID_NAME
+    if (
+        (own / "setup_preflight").is_dir()
+        and recorded.is_file()
+        and recorded.read_text(encoding="utf-8").split() == _root_identity(root).split()
+    ):
+        return own
+    return checker_home()
 
 
 def personal_dir(root: Path) -> Path:
@@ -264,10 +358,13 @@ def describe(root: Path) -> dict[str, object]:
     home = personal_dir(root)
     legacy = legacy_local_dir(root)
     main = main_worktree(root)
-    checker = checker_home(root)
+    checker = checker_home()
+    own = project_checker_home(root)
     return {
         "adopted": adopted(root),
-        "checker_dir": str(checker) if checker is not None else None,
+        "checker_dir": str(checker),
+        "import_dir": str(import_dir(root)),
+        "project_checker_dir": str(own),
         "main_worktree": str(main) if main is not None else None,
         "personal_dir": str(home),
         "personal_dir_exists": home.is_dir(),
@@ -282,8 +379,16 @@ def main(argv: list[str] | None = None) -> int:
         prog="setup_preflight.layers", description="Print where Magpie config lives."
     )
     parser.add_argument("--project-root", default=".", type=Path)
+    parser.add_argument(
+        "--install-source",
+        type=Path,
+        help="print the directory a checker copied from this source may be installed in",
+    )
     args = parser.parse_args(argv)
-    print(json.dumps(describe(args.project_root), indent=2, sort_keys=True))
+    described = describe(args.project_root)
+    if args.install_source is not None:
+        described["install_dir"] = str(checker_install_dir(args.project_root, args.install_source))
+    print(json.dumps(described, indent=2, sort_keys=True))
     return 0
 
 

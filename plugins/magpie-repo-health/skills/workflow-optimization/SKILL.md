@@ -18,7 +18,7 @@ argument-hint: "--repo owner/name"
 capability: capability:triage
 surface_hash: sha256:bbfe83b236640f9e
 license: Apache-2.0
-measured_tokens: 3154
+measured_tokens: 3280
 ---
 
 <!-- SPDX-License-Identifier: Apache-2.0
@@ -43,15 +43,19 @@ Run the checker with this skill's own frontmatter `name:` and
 `surface_hash:`, and one `--requires` for each `requires_config:` entry:
 
 ```bash
-PYTHONPATH="$(git rev-parse --git-common-dir 2>/dev/null || { test -e .git || { test -f .svn/wc.db && echo .svn; }; })/apache-magpie" \
+PYTHONPATH="$(python3 -I -c 'import hashlib,os,sys;h,d,m,i=sys.argv[1:];r=os.path.realpath(os.curdir);s=os.stat(r);p=os.path.join(h,d,hashlib.sha256(r.encode()).hexdigest()[:16]);f=os.path.join(p,i);print(p if os.path.isdir(os.path.join(p,m)) and os.path.isfile(f) and open(f).read().split()==[str(s.st_dev),str(s.st_ino)] else h)' "$HOME/.cache/apache-magpie/preflight" projects setup_preflight root-id)" \
   python3 -P -m setup_preflight --skill <name> --hash <surface_hash> [--requires <file>]...
 ```
 
-The path finds the checker `/magpie-setup:setup config` installed in the
-git directory's `apache-magpie/` (`.svn/apache-magpie/` in a Subversion
-working copy). Pre-flight imports the checker only from paths a
-repository cannot commit: `-P` keeps the working tree off the import
-path, and no in-tree directory is on it. Never add one.
+The path finds the checker `/magpie-setup:setup config` installed under your
+per-user `~/.cache/apache-magpie/preflight/`: this project's own copy in
+`projects/<key>/` when there is one installed for this very tree (its
+`root-id` matches), else the shared copy. Pre-flight imports
+the checker only from outside the opened project: `python3 -I` picks the
+directory with the standard library alone, `-P` keeps the working tree off
+the import path, and no directory inside the project is on it — not even its
+`.git/` or `.svn/`, which a checkout or a tarball can carry as plain files.
+Never add one.
 
 - **`{"verdict": "ok"}`** → **silent**. Continue into the work the user
   asked for and say nothing about pre-flight. This is the ordinary answer.
@@ -70,8 +74,7 @@ path, and no in-tree directory is on it. Never add one.
   checkout's `.apache-magpie-local/<file>`, `<git-common-dir>/apache-magpie/<file>`,
   `.svn/apache-magpie/<file>`, then `.apache-magpie-overrides/<file>`), stay silent if they all resolve, and
   run `/magpie-setup:setup config` for this skill if any does not, which also
-  installs the checker. With no version control there is no checker, by
-  design: resolve the entries the same way. Otherwise the project *is* set up and its checker
+  installs the checker. Otherwise the project *is* set up and its checker
   is missing or stale: say so, propose `/magpie-setup:setup config` to install
   it or `/magpie-setup:setup upgrade` to refresh it, and carry on with the work.
 

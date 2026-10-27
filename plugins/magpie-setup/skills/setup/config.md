@@ -82,7 +82,7 @@ When entered this way:
    it — the same `PYTHONPATH` as every skill's pre-flight:
 
    ```bash
-   PYTHONPATH="$(git rev-parse --git-common-dir 2>/dev/null || { test -e .git || { test -f .svn/wc.db && echo .svn; }; })/apache-magpie" \
+   PYTHONPATH="$(python3 -I -c 'import hashlib,os,sys;h,d,m,i=sys.argv[1:];r=os.path.realpath(os.curdir);s=os.stat(r);p=os.path.join(h,d,hashlib.sha256(r.encode()).hexdigest()[:16]);f=os.path.join(p,i);print(p if os.path.isdir(os.path.join(p,m)) and os.path.isfile(f) and open(f).read().split()==[str(s.st_dev),str(s.st_ino)] else h)' "$HOME/.cache/apache-magpie/preflight" projects setup_preflight root-id)" \
      python3 -P -m setup_preflight.layers
    ```
 
@@ -98,11 +98,9 @@ When entered this way:
    values are written to the main checkout's directory and so are shared
    with every worktree that has none of its own.
 
-   The same output's `checker_dir` is where Step 2a installs the checker.
-   It is not the personal layer: it is
-   `$(git rev-parse --path-format=absolute --git-common-dir)/apache-magpie/`
-   in git and `<repo-root>/.svn/apache-magpie/` in a Subversion working
-   copy, adopted or not, and there is none with no version control.
+   The checker is not in the personal layer either: it lives under your
+   per-user `~/.cache/apache-magpie/preflight/` (`checker_dir`), with or
+   without version control, and Step 2a decides where.
 4. **Which skills.** Resolve `<skills>` to the set whose configuration
    is in scope.
 
@@ -152,38 +150,69 @@ Say which case applied.
 ## Step 2a — Install the pre-flight checker
 
 Copy the framework's `setup_preflight/` package into a
-`setup_preflight/` directory in the `checker_dir` from Step 0, replacing any copy already
+`setup_preflight/` directory in the install directory below, replacing any copy already
 there. The package lives in this skill's own directory, `setup_preflight/`
 next to this file, so every install method has it: on a marketplace
 install that is inside the installed `magpie-setup` plugin, and on a
 snapshot install `<snapshot-dir>/tools/setup-preflight/src/setup_preflight/`
 reaches the same files.
 
-This is what every skill's pre-flight actually runs — the path finds the
-copy in the git directory's `apache-magpie/`, or a Subversion working
-copy's `.svn/apache-magpie/`:
+**Where it goes depends on where it comes from, and fails closed.** The
+shared `~/.cache/apache-magpie/preflight/` serves every project on this
+machine, so it takes a copy **only** from a known framework location —
+`~/.claude/plugins/cache/apache-magpie/`, `~/.agents/plugins/magpie/`,
+`~/.gemini/config/plugins/` or `~/.cache/apache-magpie/framework/`,
+resolved — and never from a source that resolves inside the project.
+**Anything else** — a pinned snapshot at `<project>/.apache-magpie/`, which
+a tarball can carry as easily as a real install, or any other directory —
+goes to this project's own `~/.cache/apache-magpie/preflight/projects/<key>/`,
+where `<key>` is the first 16 hex digits of the SHA-256 of the project
+root's resolved path, and serves this project only. Beside it goes a
+`root-id` file holding the resolved root's `st_dev` and `st_ino`: the path
+outlives the project, so pre-flight uses this copy only while the tree at
+that path is still the one it was installed for.
+Run this from the project root, with `source_dir` set to the package you
+are copying, and install into what it prints. For a per-project target it
+also creates the directory and writes `root-id`
+(`python3 -P -m setup_preflight.layers --install-source <source_dir>`
+prints the same directory as `install_dir`, without writing anything):
 
 ```bash
-PYTHONPATH="$(git rev-parse --git-common-dir 2>/dev/null || { test -e .git || { test -f .svn/wc.db && echo .svn; }; })/apache-magpie" \
+python3 -I -c 'import hashlib,os,sys;s,h,d,i,*k=sys.argv[1:];r=os.path.realpath(os.curdir);s=os.path.realpath(s);t=not(s==r or s.startswith(r.rstrip(os.sep)+os.sep)) and any(s==x or s.startswith(x.rstrip(os.sep)+os.sep) for x in map(os.path.realpath,k));p=os.path.join(h,d,hashlib.sha256(r.encode()).hexdigest()[:16]);st=os.stat(r);t or os.makedirs(p,0o700,exist_ok=True);t or open(os.path.join(p,i),"w").write("%d %d\n"%(st.st_dev,st.st_ino));print(h if t else p)' "$source_dir" "$HOME/.cache/apache-magpie/preflight" projects root-id "$HOME/.claude/plugins/cache/apache-magpie" "$HOME/.agents/plugins/magpie" "$HOME/.gemini/config/plugins" "$HOME/.cache/apache-magpie/framework"
+```
+
+This is what every skill's pre-flight actually runs — the path finds this
+project's own copy when there is one and its `root-id` matches, else the
+shared copy:
+
+```bash
+PYTHONPATH="$(python3 -I -c 'import hashlib,os,sys;h,d,m,i=sys.argv[1:];r=os.path.realpath(os.curdir);s=os.stat(r);p=os.path.join(h,d,hashlib.sha256(r.encode()).hexdigest()[:16]);f=os.path.join(p,i);print(p if os.path.isdir(os.path.join(p,m)) and os.path.isfile(f) and open(f).read().split()==[str(s.st_dev),str(s.st_ino)] else h)' "$HOME/.cache/apache-magpie/preflight" projects setup_preflight root-id)" \
   python3 -P -m setup_preflight --skill … --hash …
 ```
 
-Pre-flight imports the checker only from paths a repository cannot
-commit. Never install it anywhere in the working tree, not even in a
-gitignored `.apache-magpie-local/`: a repository can commit that
-directory too, and `-P` keeps the working tree off the import path so
-that opening a repository is never enough to run code it carries. With
-no version control there is no `checker_dir`: skip this step and say
-that skills resolve their configuration without the checker there.
-An older copy in the personal layer's `.apache-magpie-local/setup_preflight/`
-is no longer imported; remove it once the new one answers.
+Pre-flight imports the checker only from outside the opened project.
+Never install it anywhere inside a project, not even in a gitignored
+`.apache-magpie-local/` or in the project's `.git/` or `.svn/`: a
+repository can commit the first, and a Subversion checkout or a tarball
+can carry a `.git/` or `.svn/` as plain files. `-P` keeps the working
+tree off the import path, so opening a project is never enough to run
+code it carries.
+An older copy under the personal layer (`.apache-magpie-local/setup_preflight/`,
+`<git-common-dir>/apache-magpie/setup_preflight/` or
+`.svn/apache-magpie/setup_preflight/`) is no longer imported; remove it
+once the new one answers.
+
+The shared copy serves every project without one of its own, so the
+last `config` or `upgrade` from a plugin decides its version. The checker
+reads each project's own lock and configuration, so a project pinned to
+an older framework is still checked against its own pin.
 
 It has to be copied rather than referenced. Under the sandbox the
 framework recommends, `~/.claude/plugins/cache/` is read-denied, so a
 module left in the plugin can be read by the agent's file tool but never
 *executed* by a shell — and a sandboxed marketplace install is exactly
-the case the check exists for. The `checker_dir` is inside the VCS's own
-directory, so nothing here reaches another clone.
+the case the check exists for. Both directories are per-user, and a
+copy from inside a project reaches no other project.
 
 **Name it when you report.** This sub-action may run unattended from a
 skill's pre-flight, and its licence to do so rests on touching only
@@ -197,7 +226,7 @@ Verify the copy answers before moving on; a checker that does not run
 makes every skill fall back to *step-0* of its `preflight-detail.md`:
 
 ```bash
-PYTHONPATH="$(git rev-parse --git-common-dir 2>/dev/null || { test -e .git || { test -f .svn/wc.db && echo .svn; }; })/apache-magpie" \
+PYTHONPATH="$(python3 -I -c 'import hashlib,os,sys;h,d,m,i=sys.argv[1:];r=os.path.realpath(os.curdir);s=os.stat(r);p=os.path.join(h,d,hashlib.sha256(r.encode()).hexdigest()[:16]);f=os.path.join(p,i);print(p if os.path.isdir(os.path.join(p,m)) and os.path.isfile(f) and open(f).read().split()==[str(s.st_dev),str(s.st_ino)] else h)' "$HOME/.cache/apache-magpie/preflight" projects setup_preflight root-id)" \
   python3 -P -m setup_preflight --skill magpie-setup --no-welcome
 ```
 

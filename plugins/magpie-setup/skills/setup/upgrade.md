@@ -411,11 +411,11 @@ it, and the next `setup verify` or `reconcile` run will still name it.
 
 ### Refresh the pre-flight checker
 
-The `setup_preflight/` directory in the `checker_dir` that
-`python3 -P -m setup_preflight.layers` prints
-(`<git-common-dir>/apache-magpie/`, or `.svn/apache-magpie/` in a
-Subversion working copy — never in the working tree, so that a repository
-cannot commit what pre-flight imports) is a **copy** of the `setup_preflight/` package in this skill's
+The `setup_preflight/` directory under your per-user
+`~/.cache/apache-magpie/preflight/` — the shared copy, or this project's
+own `projects/<key>/` copy on a snapshot install; never inside a project,
+so that nothing a project carries, its `.git/` or `.svn/` included, is
+what pre-flight imports — is a **copy** of the `setup_preflight/` package in this skill's
 own directory, taken when
 [`config`](config.md#step-2a--install-the-pre-flight-checker) last ran.
 An upgrade moves the framework underneath it, so replace that copy with
@@ -425,31 +425,38 @@ upgrade took everything else from.
 Copy the files, not a link to them.
 `tools/setup-preflight/src/setup_preflight` is a relative symlink to that
 same package, so a plain `cp -R` from it leaves a link in the
-`checker_dir` that points nowhere.
+install directory that points nowhere.
 Copy from the skill's directory, or follow the link with `cp -RL`.
 For marketplace installs, use the `setup_preflight/` directory next
-to this skill in the installed plugin. Get the destination from
-`python3 -P -m setup_preflight.layers` as in
-[`config` Step 0](config.md#step-0--pre-flight).
+to this skill in the installed plugin. The destination follows the
+source exactly as in
+[`config` Step 2a](config.md#step-2a--install-the-pre-flight-checker):
+a source in a known framework location (the installed plugin) refreshes
+the shared copy, and anything else (a pinned snapshot) refreshes only this
+project's own copy, rewriting its `root-id` — never
+the shared one.
 The marketplace cache under `~/.claude/plugins/cache/` is read-denied
 to a sandboxed shell. For a marketplace install, ask the user to run
 the following commands in their own terminal, outside the sandbox.
 For a readable snapshot install, the commands can run in the sandbox.
 
 Set `source_dir` to that installed skill's `setup_preflight/` directory,
-and `checker_dir` and `personal_dir` to the directories reported by
-`setup_preflight.layers`, before running the commands. Use their actual
-paths, not placeholders. With no version control there is no
-`checker_dir` and nothing to refresh. Check the new copy before
-replacing the old one:
+`checker_dir` to what `config` Step 2a's install-directory command prints
+for it (run from the project root), `personal_dir` to the personal layer
+`setup_preflight.layers` reports, and `vcs_dir` to the project's
+`<git-common-dir>/apache-magpie` (`.svn/apache-magpie` in a Subversion
+working copy, empty with no version control), before running the
+commands. Use their actual paths, not placeholders. Check the new copy
+before replacing the old one:
 
 ```bash
 (
   target="$checker_dir/setup_preflight"
   legacy="$personal_dir/setup_preflight"
+  legacy_vcs="${vcs_dir:+$vcs_dir/setup_preflight}"
 
-  if [ -e "$target" ] || [ -L "$target" ] ||
-     { [ "$legacy" != "$target" ] && [ -e "$legacy" ]; }; then
+  if [ -e "$target" ] || [ -L "$target" ] || [ -e "$legacy" ] ||
+     { [ -n "$legacy_vcs" ] && [ -e "$legacy_vcs" ]; }; then
     mkdir -p -m 700 "$checker_dir" || exit 1
     temp="$(mktemp -d "$checker_dir/.preflight.XXXXXX")" || exit 1
     cp -RL "$source_dir" "$temp/setup_preflight" &&
@@ -465,11 +472,12 @@ replacing the old one:
 )
 ```
 
-The second condition moves a checker an earlier version installed in an
-adopted project's `.apache-magpie-local/`: pre-flight no longer imports
-from the working tree, so that copy is dead. Say so, and offer to delete
-`$personal_dir/setup_preflight` once the new copy answers; never delete
-it unasked.
+The other conditions move a checker an earlier version installed inside
+the project — in an adopted project's `.apache-magpie-local/`, or in the
+project's `.git/apache-magpie/` or `.svn/apache-magpie/`. Pre-flight no
+longer imports from inside a project, so those copies are dead. Say so,
+and offer to delete `$legacy` and `$legacy_vcs` once the new copy
+answers; never delete them unasked.
 
 The fresh copy also carries the new version's isolated-setup
 fingerprint. When the secure-setup files changed in this upgrade, the
@@ -478,9 +486,8 @@ proposes `setup-isolated-setup-update` — the refresh is what makes that
 happen on a marketplace install, where there is no framework source to
 hash.
 
-Skip it when neither copy exists: a project that never ran
-`config` has nothing to refresh, and creating the directory here would
-manufacture the "has been configured" signal its absence carries.
+Skip it when no copy exists: a project that never ran `config` has
+nothing to refresh, and `config` is what installs the checker.
 
 A stale copy is the likeliest cause of a skill reporting that its
 pre-flight checker is missing or broken (*step-0* of
@@ -489,7 +496,7 @@ introduces and this step closes. Verify the refreshed copy answers before
 reporting the upgrade complete:
 
 ```bash
-PYTHONPATH="$(git rev-parse --git-common-dir 2>/dev/null || { test -e .git || { test -f .svn/wc.db && echo .svn; }; })/apache-magpie" \
+PYTHONPATH="$(python3 -I -c 'import hashlib,os,sys;h,d,m,i=sys.argv[1:];r=os.path.realpath(os.curdir);s=os.stat(r);p=os.path.join(h,d,hashlib.sha256(r.encode()).hexdigest()[:16]);f=os.path.join(p,i);print(p if os.path.isdir(os.path.join(p,m)) and os.path.isfile(f) and open(f).read().split()==[str(s.st_dev),str(s.st_ino)] else h)' "$HOME/.cache/apache-magpie/preflight" projects setup_preflight root-id)" \
   python3 -P -m setup_preflight --skill magpie-setup --no-welcome
 ```
 

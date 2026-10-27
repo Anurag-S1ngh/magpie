@@ -386,11 +386,11 @@ PREFLIGHT_BLOCK = REPO_ROOT / "tools" / "dev" / "preflight-block.md"
 
 
 def _documented_pythonpath() -> str:
-    import re
-
-    match = re.search(r'^PYTHONPATH="([^"]+)"', PREFLIGHT_BLOCK.read_text(encoding="utf-8"), re.M)
-    assert match, "the pre-flight block names no PYTHONPATH"
-    return match.group(1)
+    """The block's `PYTHONPATH=…` value, as written (the shell has not expanded it)."""
+    for line in PREFLIGHT_BLOCK.read_text(encoding="utf-8").splitlines():
+        if line.startswith("PYTHONPATH="):
+            return line.removeprefix("PYTHONPATH=").rstrip("\\").rstrip()
+    raise AssertionError("the pre-flight block names no PYTHONPATH")
 
 
 def _block_command() -> str:
@@ -398,7 +398,7 @@ def _block_command() -> str:
     text = PREFLIGHT_BLOCK.read_text(encoding="utf-8")
     lines = text.splitlines()
     for index, line in enumerate(lines):
-        if line.startswith('PYTHONPATH="'):
+        if line.startswith("PYTHONPATH="):
             return line.rstrip("\\").rstrip() + " " + lines[index + 1].strip()
     raise AssertionError("the pre-flight block names no PYTHONPATH")
 
@@ -451,21 +451,156 @@ def test_the_block_runs_the_checker_with_dash_p() -> None:
 def test_the_block_pythonpath_names_no_in_tree_directory() -> None:
     pythonpath = _documented_pythonpath()
     assert ".apache-magpie-local" not in pythonpath
-    assert ":" not in pythonpath, "one directory, the checker_dir"
+    assert "git" not in pythonpath and ".svn" not in pythonpath, "nothing the opened tree can supply"
+    assert '"$HOME/.cache/apache-magpie/preflight"' in pythonpath, (
+        "a per-user directory, outside every project"
+    )
+    assert "python3 -I " in pythonpath, "choosing the directory runs no code from the opened tree"
+
+
+def _block_dir(root: Path, home: Path) -> str:
+    """The directory the block's PYTHONPATH expands to when run in `root`."""
+    import os
+
+    done = subprocess.run(
+        ["sh", "-c", f'PYTHONPATH={_documented_pythonpath()}; printf %s "$PYTHONPATH"'],
+        cwd=root,
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home)},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return done.stdout
 
 
 @pytest.mark.skipif(not PREFLIGHT_BLOCK.is_file(), reason="needs the framework tree")
-@pytest.mark.parametrize("vcs", ["git", "svn"])
+def test_the_block_and_layers_agree_on_the_import_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shared dir by default; a project's own dir once a per-project checker is installed there."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    root = _project(tmp_path, "git")
+    assert _block_dir(root, home) == str(layers.checker_home())
+    assert layers.import_dir(root) == layers.checker_home()
+    own = layers.project_checker_home(root)
+    assert own.parent == layers.checker_home() / "projects"
+    (own / "setup_preflight").mkdir(parents=True)
+    # Not this project's until its identity is recorded beside the install.
+    assert _block_dir(root, home) == str(layers.checker_home())
+    assert layers.import_dir(root) == layers.checker_home()
+    layers.record_root_identity(root)
+    assert _block_dir(root, home) == str(own)
+    assert layers.import_dir(root) == own
+    # Through a symlinked path the key is the same, because both resolve it.
+    link = tmp_path / "link"
+    link.symlink_to(root)
+    assert _block_dir(link, home) == str(own)
+    assert layers.project_checker_home(link) == own
+
+
+def test_only_a_known_framework_location_installs_to_the_shared_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail closed: the shared dir takes a source only from a known framework root, resolved."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    root = _project(tmp_path, "git")
+    own = layers.project_checker_home(root)
+    snapshot = root / ".apache-magpie" / "tools" / "setup-preflight" / "src" / "setup_preflight"
+    snapshot.mkdir(parents=True)
+    assert layers.checker_install_dir(root, snapshot) == own
+    # Somewhere else on disk is not a framework location either.
+    elsewhere = tmp_path / "elsewhere" / "setup_preflight"
+    elsewhere.mkdir(parents=True)
+    assert layers.checker_install_dir(root, elsewhere) == own
+    for known in layers.framework_roots():
+        assert known.is_relative_to(home)
+        source = known / "magpie-setup" / "0.2.0" / "skills" / "setup" / "setup_preflight"
+        source.mkdir(parents=True)
+        assert layers.checker_install_dir(root, source) == layers.checker_home(), known
+    # A link under a known root that resolves into the project is the project's.
+    planted = layers.framework_roots()[0] / "planted"
+    planted.symlink_to(snapshot)
+    assert layers.checker_install_dir(root, planted) == own
+    # A known root that is itself a link into the project does not count either.
+    framework = layers.framework_roots()[-1]
+    shutil_rmtree(framework)
+    framework.symlink_to(root)
+    assert layers.checker_install_dir(root, framework / ".apache-magpie") == own
+
+
+def shutil_rmtree(path: Path) -> None:
+    import shutil
+
+    shutil.rmtree(path)
+
+
+@pytest.mark.skipif(not PREFLIGHT_BLOCK.is_file(), reason="needs the framework tree")
+def test_a_project_recreated_at_the_same_path_does_not_inherit_the_old_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    root = _project(tmp_path, "git")
+    own = layers.project_checker_home(root)
+    (own / "setup_preflight").mkdir(parents=True)
+    layers.record_root_identity(root)
+    assert layers.import_dir(root) == own
+    assert _block_dir(root, home) == str(own)
+    # Keep the old directory's inode alive, so the new one cannot reuse it.
+    moved = tmp_path / "moved-away"
+    root.rename(moved)
+    root = _project(tmp_path, "git")
+    assert layers.project_checker_home(root) == own, "same path, same key"
+    assert layers.import_dir(root) == layers.checker_home()
+    assert _block_dir(root, home) == str(layers.checker_home())
+    shutil.rmtree(moved)
+
+
+@pytest.mark.skipif(not PREFLIGHT_BLOCK.is_file(), reason="needs the framework tree")
+def test_a_crafted_snapshot_does_not_change_what_another_project_imports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tree carrying its own `.apache-magpie/` snapshot is installed for itself only."""
+    import shutil
+
+    home = tmp_path
+    monkeypatch.setenv("HOME", str(home))
+    marker = tmp_path / "planted-ran"
+    crafted = _project(tmp_path / "crafted", "none")
+    source = crafted / ".apache-magpie" / "src"
+    _plant(source, marker)
+    shutil.copytree(
+        source / "setup_preflight",
+        layers.checker_install_dir(crafted, source / "setup_preflight") / "setup_preflight",
+    )
+    layers.record_root_identity(crafted)
+    other = _project(tmp_path / "other", "git")
+    done = _run_block(other, tmp_path, "setup_preflight")
+    assert not marker.exists(), marker.read_text(encoding="utf-8")
+    assert "PLANTED" not in done.stdout
+    # It does run in the crafted tree itself, which is as before: that tree is the framework there.
+    _run_block(crafted, tmp_path, "setup_preflight")
+    assert marker.exists()
+
+
+@pytest.mark.skipif(not PREFLIGHT_BLOCK.is_file(), reason="needs the framework tree")
+@pytest.mark.parametrize("vcs", ["git", "svn", "none"])
 @pytest.mark.parametrize("adopted", [False, True])
-def test_the_block_finds_the_checker_in_its_checker_dir(tmp_path: Path, vcs: str, adopted: bool) -> None:
+def test_the_block_finds_the_checker_in_its_checker_dir(
+    tmp_path: Path, vcs: str, adopted: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Install the checker where `config` would, then resolve it exactly as the block does."""
     import shutil
 
+    monkeypatch.setenv("HOME", str(tmp_path))
     root = _project(tmp_path, vcs)
     if adopted:
         (root / layers.LOCK_NAME).write_text("method: marketplace\n", encoding="utf-8")
-    home = layers.checker_home(root)
-    assert home is not None
+    home = layers.checker_home()
     package = Path(layers.__file__).resolve().parent
     shutil.copytree(package, home / "setup_preflight")
     done = _run_block(root, tmp_path, "setup_preflight.layers")
@@ -473,6 +608,36 @@ def test_the_block_finds_the_checker_in_its_checker_dir(tmp_path: Path, vcs: str
     assert done.stderr == ""
     described = json.loads(done.stdout)
     assert Path(described["checker_dir"]).resolve() == home.resolve()
+
+
+def _crafted_git_dir(root: Path) -> Path:
+    """A `.git/` that arrived as files (an svn checkout, a tarball), yet `git` accepts."""
+    dotgit = root / ".git"
+    (dotgit / "objects").mkdir(parents=True)
+    (dotgit / "refs" / "heads").mkdir(parents=True)
+    (dotgit / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    return dotgit
+
+
+@pytest.mark.skipif(not PREFLIGHT_BLOCK.is_file(), reason="needs the framework tree")
+@pytest.mark.parametrize("carrier", ["svn", "none"])
+def test_a_vcs_directory_shipped_in_the_tree_is_never_imported(tmp_path: Path, carrier: str) -> None:
+    """A `.git/` or `.svn/` inside the opened tree can be content, not the VCS's own.
+
+    Subversion versions a `.git/` like any directory, and a tarball can carry
+    either, `wc.db` included.  A checker planted there must never be imported.
+    """
+    root = _project(tmp_path, carrier)
+    marker = tmp_path / "planted-ran"
+    _plant(_crafted_git_dir(root) / layers.GIT_HOME_NAME, marker)
+    if carrier == "none":
+        (root / ".svn").mkdir()
+        (root / ".svn" / "wc.db").write_bytes(b"")
+    _plant(root / ".svn" / layers.GIT_HOME_NAME, marker)
+    done = _run_block(root, tmp_path, "setup_preflight")
+    assert not marker.exists(), marker.read_text(encoding="utf-8")
+    assert "PLANTED" not in done.stdout
+    assert done.returncode != 0, "no checker is installed, so the block must not succeed"
 
 
 @pytest.mark.skipif(not PREFLIGHT_BLOCK.is_file(), reason="needs the framework tree")
@@ -500,21 +665,60 @@ def test_a_committable_setup_preflight_is_never_imported(tmp_path: Path, vcs: st
     assert done.returncode != 0, "no checker is installed, so the block must not succeed"
 
 
-def test_checker_home_is_inside_the_vcs_directory(tmp_path: Path) -> None:
-    def home(root: Path) -> Path:
-        found = layers.checker_home(root)
-        assert found is not None
-        return found.resolve()
+@pytest.mark.parametrize("vcs", ["git", "svn", "none"])
+def test_checker_home_is_per_user_and_outside_every_project(
+    tmp_path: Path, vcs: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user_home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(user_home))
+    root = _project(tmp_path, vcs)
+    expected = user_home / ".cache" / "apache-magpie" / "preflight"
+    assert layers.checker_home() == expected
+    assert Path(str(layers.describe(root)["checker_dir"])) == expected
+    (root / layers.LOCK_NAME).write_text("method: marketplace\n", encoding="utf-8")
+    assert Path(str(layers.describe(root)["checker_dir"])) == expected
 
-    git_root = _project(tmp_path / "g", "git")
-    assert home(git_root) == (git_root / ".git" / "apache-magpie").resolve()
-    (git_root / layers.LOCK_NAME).write_text("method: marketplace\n", encoding="utf-8")
-    assert home(git_root) == (git_root / ".git" / "apache-magpie").resolve()
-    svn_root = _project(tmp_path / "s", "svn")
-    assert home(svn_root) == (svn_root / ".svn" / "apache-magpie").resolve()
+
+CONFIG_DOC = REPO_ROOT / "plugins" / "magpie-setup" / "skills" / "setup" / "config.md"
 
 
-def test_no_version_control_has_no_checker_home(tmp_path: Path) -> None:
-    root = _project(tmp_path, "none")
-    assert layers.checker_home(root) is None
-    assert layers.describe(root)["checker_dir"] is None
+@pytest.mark.skipif(not CONFIG_DOC.is_file(), reason="needs the framework tree")
+@pytest.mark.parametrize("where", ["snapshot", "elsewhere", "plugin"])
+def test_config_install_command_agrees_with_layers(
+    tmp_path: Path, where: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`config` Step 2a's one-liner picks the same install directory as `checker_install_dir`,
+    and records the project's identity beside a per-project install."""
+    import os
+
+    command = next(
+        line
+        for line in CONFIG_DOC.read_text(encoding="utf-8").splitlines()
+        if line.startswith("python3 -I -c 'import hashlib,os,sys;s,h,d,i,*k=")
+    )
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    root = _project(tmp_path, "git")
+    source = {
+        "snapshot": root / ".apache-magpie" / "setup_preflight",
+        "elsewhere": tmp_path / "elsewhere" / "setup_preflight",
+        "plugin": layers.framework_roots()[0] / "magpie-setup" / "skills" / "setup" / "setup_preflight",
+    }[where]
+    source.mkdir(parents=True)
+    done = subprocess.run(
+        ["sh", "-c", command],
+        cwd=root,
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home), "source_dir": str(source)},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    for known in layers.FRAMEWORK_ROOTS:
+        assert f'"$HOME/{known.as_posix()}"' in command, f"the one-liner misses {known}"
+    expected = layers.checker_install_dir(root, source)
+    assert done.stdout.strip() == str(expected)
+    shared = where == "plugin"
+    assert (expected == layers.checker_home()) is shared
+    if not shared:
+        (expected / "setup_preflight").mkdir()
+        assert layers.import_dir(root) == expected, "the one-liner recorded the identity"
