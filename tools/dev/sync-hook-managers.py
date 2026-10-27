@@ -54,7 +54,7 @@ SANDBOX_LINT = Path("tools/sandbox-lint/src/sandbox_lint/__init__.py")
 SETTINGS = (Path(".claude/settings.json"), Path("tools/sandbox-lint/expected.json"))
 
 #: Install strategies the shim implements. A new one lands with its shim branch.
-STRATEGIES = {"git-dir-flag", "none"}
+STRATEGIES = {"git-dir-flag", "hide-global-config", "none"}
 
 _NAME = re.compile(r"^[a-z][a-z0-9-]*$")
 _ENV = re.compile(r"^[A-Z][A-Z0-9_]*$")
@@ -111,17 +111,18 @@ def validate(registry: dict[str, Any]) -> list[str]:
                     f"{where}.install.strategy: {strategy!r} is not one the shim implements "
                     f"({', '.join(sorted(STRATEGIES))})"
                 )
-            if strategy != "none":
-                if not isinstance(install.get("subcommand"), str) or not _NAME.match(install["subcommand"]):
-                    errors.append(f"{where}.install.subcommand: missing")
-                if strategy == "git-dir-flag" and not (
-                    isinstance(install.get("flag"), str) and _FLAG.match(install["flag"])
-                ):
-                    errors.append(
-                        f"{where}.install.flag: git-dir-flag needs the long option that takes the git dir"
-                    )
-            elif "flag" in install:
-                errors.append(f"{where}.install.flag: strategy 'none' takes no flag")
+            if strategy != "none" and (
+                not isinstance(install.get("subcommand"), str) or not _NAME.match(install["subcommand"])
+            ):
+                errors.append(f"{where}.install.subcommand: missing")
+            if strategy == "git-dir-flag" and not (
+                isinstance(install.get("flag"), str) and _FLAG.match(install["flag"])
+            ):
+                errors.append(
+                    f"{where}.install.flag: git-dir-flag needs the long option that takes the git dir"
+                )
+            elif strategy != "git-dir-flag" and "flag" in install:
+                errors.append(f"{where}.install.flag: strategy {strategy!r} takes no flag")
         home = adapter.get("home")
         if home is None:
             continue  # a manager that keeps nothing outside the repository

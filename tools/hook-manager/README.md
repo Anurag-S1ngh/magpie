@@ -72,7 +72,7 @@ It leaves the install alone when the caller already chose a target, asked for he
 | Strategy | What the shim does | Status |
 |---|---|---|
 | `git-dir-flag` | Inserts `<flag> <common dir>` after the install subcommand (prek: `--git-dir`; prek refuses a bare install while a global `core.hooksPath` is set). | implemented |
-| `hide-global-config` | Runs the install with `GIT_CONFIG_GLOBAL=/dev/null`, for a manager that writes to the common dir but refuses while a global `core.hooksPath` is set (pre-commit, lefthook). | planned |
+| `hide-global-config` | Runs the install with `GIT_CONFIG_GLOBAL=/dev/null`, for a manager that writes to the common dir but refuses while a global `core.hooksPath` is set (pre-commit, lefthook). The shim applies it to every install, including one carrying `--force` or `--reset-hooks-path`, so neither can reach the shared directory through the shim; run the real binary to do that. | implemented |
 | `hooks-path-env` | Runs the install with `GIT_CONFIG_COUNT=1`, `GIT_CONFIG_KEY_0=core.hooksPath`, `GIT_CONFIG_VALUE_0=<common dir>/hooks`, for a manager that writes into whatever `core.hooksPath` names (overcommit, CaptainHook). The value must be that absolute path: git treats an empty `core.hooksPath` as set, and hooks then resolve against the filesystem root. | planned |
 | `none` | The manager already writes to the repository's own hooks directory whatever the global value (simple-git-hooks, cargo-husky, the JGit-based Maven plugins). | implemented |
 
@@ -114,6 +114,12 @@ Detection decides what the setup configures *for a repository*; it never decides
 How prek configures itself, from its source (v0.5.7): it reads one project config per directory, `prek.toml`, then `.pre-commit-config.yaml`, then `.pre-commit-config.yml` (`crates/prek-consts/src/lib.rs`); searches upward from the current directory to the git root for the workspace root, and below it for nested project configs, honouring `.gitignore` and `.prekignore` (`crates/prek/src/workspace.rs`); takes `--config <path>` instead, which disables discovery and is baked into the installed hook; and reads a user-level `prek.toml` under the platform config directory that holds only update and display options, so it says nothing about whether a repository uses prek.
 The two YAML names are shared with pre-commit, so a repository with one uses both managers as far as detection goes; configuring a home the repository's hooks do not end up using is harmless.
 
+How lefthook configures itself, from its source (v2.2.2): it reads `lefthook`, `.lefthook` or `.config/lefthook` with one of `.yml`, `.yaml`, `.json`, `.jsonc`, `.toml`, and the same three names with a `-local` suffix as the repository's local override (`internal/config/loader.go`).
+Only the bare root names are in the registry: the contract's `detect.config_files` holds file names, not directories, so a `.config/lefthook.yml` at the repository root is not detected by rule 1; the installed hook's `call_lefthook` marker still catches it by rule 3.
+`lefthook install` writes to `$(git rev-parse --git-path hooks)` and refuses while a scoped `git config --local` or `--global` read returns any `core.hooksPath` (`internal/command/install.go`).
+`GIT_CONFIG_GLOBAL=/dev/null` hides the global value from that read, and the path then resolves to the common directory, linked worktrees included.
+Remote configs are cloned into `<git info>/lefthook-remotes`, inside `.git`, so the registry omits `home`.
+
 ## Registry
 
 [`registry.json`](registry.json) holds one adapter per manager under `adapters.<binary name>`:
@@ -149,7 +155,7 @@ Its operations are carried out by the scripts generated from the registry:
 
 | Operation | Run by | Invocation | Behaviour |
 |---|---|---|---|
-| Install rewrite | [`hook-manager-shim.sh`](../agent-isolation/hook-manager-shim.sh), installed as `~/.claude/bin/<tool>` | `<tool> <install.subcommand> [args…]`, e.g. `prek install` | Applies the adapter's install strategy — for prek, runs `prek install --git-dir <absolute common dir> [args…]`. Left unchanged when `args` already carry the flag or `-h` / `--help`, or outside a git work tree. Every other subcommand passes through to the real binary, the next `<tool>` on `PATH` that is not the shim. Exits 127 when the name it is installed under has no adapter or no real binary is found. |
+| Install rewrite | [`hook-manager-shim.sh`](../agent-isolation/hook-manager-shim.sh), installed as `~/.claude/bin/<tool>` | `<tool> <install.subcommand> [args…]`, e.g. `prek install` | Applies the adapter's install strategy: `git-dir-flag` runs `prek install --git-dir <absolute common dir> [args…]`; `hide-global-config` runs the install with `GIT_CONFIG_GLOBAL=/dev/null`. Left unchanged when `args` already carry the flag, ask for `-h` / `--help`, or outside a git work tree; a `hide-global-config` install carrying `--force` or `--reset-hooks-path` still gets the override, so neither reaches the shared directory through the shim. Every other subcommand passes through to the real binary, the next `<tool>` on `PATH` that is not the shim. Exits 127 when the name it is installed under has no adapter or no real binary is found. |
 | Host home | [`git-hook-dispatcher.sh`](../agent-isolation/git-hook-dispatcher.sh), from `~/.claude/git-hooks/` | Every hook git runs, before it chains to the repository's own hook | Outside the sandbox (no `SANDBOX_RUNTIME`), exports `<home.env>=~/.local/share/<home.host>` for every registered manager unless the operator's value lies outside `~/.cache`, and moves `XDG_CACHE_HOME` to `~/.local/share/prek-host/cache` by the same rule. Sandboxed hooks keep their values. |
 | Home check | [`sandbox-lint`](../sandbox-lint/) | `uv run --project tools/sandbox-lint sandbox-lint` | Fails a settings file whose `permissions.deny` lacks `Edit(<home.default>/**)` for any registered manager, and, for a project that uses a manager (see [Detection](#detection)), one whose `env.<home.env>` is missing or overlaps the default home. |
 | Registry sync | [`tools/dev/sync-hook-managers.py`](../dev/sync-hook-managers.py) | `tools/dev/sync-hook-managers.py [--check]`; the `sync-hook-managers` prek hook | Validates `registry.json`, rewrites the generated blocks of the three scripts above, and checks the committed settings and the sandbox-lint baseline. Exits 1 when a block changed (re-stage and commit), or, with `--check`, when one would. |
@@ -175,6 +181,7 @@ What a repository or an operator configures is where each manager's environments
 | `cargo-husky` | Rust | `none`; detected by a hook mentioning `cargo-husky` | none (no external home) | shipping (in linked worktrees `build.rs` skips hook install: searches for a `.git` directory) |
 | `git-build-hook` | Java | `none`; detected by `pom.xml` (nested too) or a hook mentioning `git-build-hook` | none (no external home) | shipping (JGit `getGitDir()` targets `<worktree>/hooks` in linked worktrees; `configure` goal can set repo-local `core.hooksPath`) |
 | `git-code-format-maven-plugin` | Java | `none`; detected by `pom.xml` (nested too) or a hook mentioning `git-code-format-maven-plugin` | none (no external home) | shipping (JGit `getCommonDirectory()` targets common hooks dir, coexisting cleanly in linked worktrees) |
+| `lefthook` | Go | `hide-global-config`; detected by `lefthook.yml`, `lefthook.yaml`, `lefthook.json`, `lefthook.jsonc`, `lefthook.toml`, their `.lefthook` and `-local` variants, or a hook mentioning `call_lefthook` | none: remote configs live under `<git info>/lefthook-remotes`, inside `.git` | shipping |
 | `prek` | Rust | `git-dir-flag` (`--git-dir`); detected by `prek.toml`, `.pre-commit-config.yaml` or `.pre-commit-config.yml` (nested too) or a hook mentioning `prek` | `PREK_HOME`: `~/.cache/prek` → sandbox `~/.cache/prek-sandbox`, host `~/.local/share/prek-host` | shipping |
 | `simple-git-hooks` | JavaScript | `none`; detected by `package.json`, `.simple-git-hooks.{js,cjs,json}`, `simple-git-hooks.{js,cjs,json}` or a hook mentioning `simple-git-hooks` | none (no external home) | shipping |
 
@@ -199,13 +206,18 @@ What a repository or an operator configures is where each manager's environments
     `AbstractMavenGitCodeFormatMojo.getOrCreateHooksDirectory()` uses `gitRepository().getCommonDirectory().toPath().resolve(HOOKS_DIR)`.
     Because it targets the common directory, hooks land in `$(git rev-parse --git-common-dir)/hooks/` and coexist cleanly in linked worktrees.
     Installs a bash wrapper invoking `mvn git-code-format-maven-plugin:format-code`.
+  - `lefthook` (v2.2.2, verified against the release binary through the shim):
+    Refuses a bare install while a scoped `git config --global` read returns any `core.hooksPath`; the shim's `GIT_CONFIG_GLOBAL=/dev/null` hides it, and the install then writes to `$(git rev-parse --git-path hooks)`, the common hooks directory.
+    `--force` and `--reset-hooks-path` still get the override through the shim, so neither reaches the shared directory or unsets the setup.
+    In a linked worktree the same install lands in the main checkout's `.git/hooks/`.
+    npm's `postinstall` runs `node_modules/.bin/lefthook` ahead of `~/.claude/bin`, so the shim does not cover it: that install refuses, and the repository needs one run through the shim.
+    A fix would be the session-start hook noticing hooks in the shared directory that are not the dispatcher; the shim cannot reach an npm-run child ahead of it on `PATH`.
 - **JGit in linked worktrees (Maven):**
   The linked-worktree limitation applies only to `git-build-hook` (`InstallMojo`), which uses `getGitDir()` and creates hooks under `<commondir>/worktrees/<name>/hooks/`.
   Because C-git commits read hooks exclusively from `$(git rev-parse --git-common-dir)/hooks/`, hooks installed by `git-build-hook` from within a worktree are ignored by Git.
   Conversely, `git-code-format-maven-plugin` explicitly calls `getCommonDirectory()`, so its hooks populate the common directory and function across worktrees.
 - **Gradle & Go hook tools:**
-  Standard Gradle plugins and Go hook utilities remain unadapted and unregistered until someone tests them under the dispatcher.
-  `lefthook` (Go) refuses install when a global `core.hooksPath` is set and is reserved for the planned `hide-global-config` install strategy.
+  Standard Gradle plugins and other Go hook utilities remain unadapted and unregistered until someone tests them under the dispatcher.
 
 ## Adding an adapter
 
