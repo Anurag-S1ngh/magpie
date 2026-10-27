@@ -612,10 +612,454 @@ def _strip_heredoc_bodies(command: str) -> str:
     return stripped
 
 
+# Reserved words bash recognises at the start of a command; the command that
+# follows one (`if git push; then …`, `{ git push; }`, `! git push`) is the one
+# that runs.
+_RESERVED_WORDS = frozenset(
+    {"!", "{", "}", "if", "then", "else", "elif", "fi", "while", "until", "do", "done"}
+    | {"case", "esac", "for", "select", "function"}
+)
+# Nesting of substitutions, subshells and groups the lexer follows; a deeper
+# command line is not tokenised (and is refused when it names a guarded head).
+_LEX_DEPTH = 32
+
+
+class _Command:
+    """One simple command as :class:`_Lexer` reads it: its words, and the
+    bodies of the heredocs it opens (data on its stdin, kept for the scans of
+    ``Segment.raw``)."""
+
+    __slots__ = ("bodies", "tokens")
+
+    def __init__(self) -> None:
+        self.tokens: list[str] = []
+        self.bodies: list[str] = []
+
+
+class _Lexer:
+    """Split a command line into simple commands the way bash reads it.
+
+    Words are read with bash's quoting (``'…'``, ``"…"``, ``$'…'``,
+    backslashes, line continuations) and ``#`` comments at the start of a
+    word. A command ends at a newline or an unquoted control operator (``;``,
+    ``&``, ``|``, ``&&``, ``||``, ``|&``, ``;;``), whether or not spaces
+    surround it; ``>&`` / ``<&`` / ``&>`` / ``>|`` stay inside the redirection
+    word. A subshell ``( … )``, a command substitution ``$( … )`` / backticks,
+    a process substitution ``<( … )`` / ``>( … )``, and the contents of
+    ``$(( … ))``, ``$[ … ]`` and ``${ … }`` are read as commands of their own,
+    since bash runs them. A heredoc's body (the lines after its operator's
+    line, up to the delimiter) is data on the command's stdin, with two
+    exceptions: substitutions in a body whose delimiter is unquoted, which
+    bash expands, and a body naming ``git`` / ``gh`` that may be run (``run_bodies``,
+    or a command that is not a bare ``cat`` / ``tee``), which is read as
+    commands too. Raises ValueError on input it cannot read like bash."""
+
+    def __init__(self, text: str, run_bodies: bool, heredocs: bool = True) -> None:
+        self.text = text
+        self.n = len(text)
+        self.run_bodies = run_bodies
+        self.heredocs = heredocs
+        self.commands: list[_Command] = []
+
+    def run(self, depth: int = 0) -> list[_Command]:
+        self.parse(0, None, depth)
+        return self.commands
+
+    def _sub(self, text: str, depth: int, heredocs: bool = True) -> None:
+        """Read ``text`` as a command line of its own, at ``depth``."""
+        self.commands.extend(_Lexer(text, self.run_bodies, heredocs).run(depth))
+
+    def parse(self, i: int, closer: str | None, depth: int) -> int:
+        """Read commands from ``text[i]`` to the end, or past the ``)`` that
+        closes a construct when ``closer`` is set; return the index after it."""
+        if depth > _LEX_DEPTH:
+            raise ValueError("nested too deeply")
+        text, n = self.text, self.n
+        cur = _Command()
+        word: list[str] | None = None
+        word_start = 0
+        # whether the last character read was an unquoted, unescaped `>` / `<`
+        redirect = False
+        pending: list[tuple[str, bool, bool, _Command]] = []
+
+        def add(piece: str) -> None:
+            nonlocal word, word_start
+            if word is None:
+                word, word_start = [], i
+            word.append(piece)
+
+        def flush() -> None:
+            nonlocal cur
+            if cur.tokens or cur.bodies:
+                self.commands.append(cur)
+                cur = _Command()
+
+        def end_word() -> None:
+            nonlocal word
+            if word is None:
+                return
+            tok, source = "".join(word), text[word_start:i]
+            word = None
+            if source == "{" and _group_opens(cur.tokens):
+                # a group in command position (`{ git push; }`, `function f {`)
+                flush()
+                return
+            if source == "}" and not cur.tokens:
+                # a group's closer, right after a control operator or newline
+                return
+            if source == "case" and closer is not None:
+                # a `case` pattern's `)` would close this construct early
+                raise ValueError("`case` inside a substitution or subshell")
+            cur.tokens.append(tok)
+
+        def end_command() -> None:
+            end_word()
+            flush()
+
+        while i < n:
+            c = text[i]
+            after_redirect, redirect = redirect, False
+            if c == ")":
+                end_command()
+                if closer == ")":
+                    if pending:
+                        raise ValueError("heredoc left open in a substitution")
+                    return i + 1
+                # a `case` pattern (`a) git push;;`): the command follows it
+                i += 1
+                continue
+            if c in " \t":
+                end_word()
+                i += 1
+                continue
+            if c == "\n":
+                end_command()
+                i += 1
+                if pending:
+                    i = self._bodies(i, pending, depth)
+                    pending = []
+                continue
+            if c == "#" and word is None:
+                nl = text.find("\n", i)
+                i = n if nl < 0 else nl
+                continue
+            if c == "\\":
+                if i + 1 >= n:
+                    raise ValueError("no escaped character")
+                if text[i + 1] != "\n":
+                    add(text[i + 1])
+                i += 2
+                continue
+            if c == "'":
+                end = text.find("'", i + 1)
+                if end < 0:
+                    raise ValueError("no closing quotation")
+                add(text[i + 1 : end])
+                i = end + 1
+                continue
+            if text.startswith("$'", i):
+                decoded, end = _ansi_c_string(text, i + 2)
+                add(decoded)
+                i = end
+                continue
+            if c == '"' or text.startswith('$"', i):
+                add("")
+                assert word is not None
+                i = self._double(i + (2 if c == "$" else 1), word, depth)
+                continue
+            if c == "$" or c == "`" or (c in "<>" and text.startswith("(", i + 1)):
+                start = i
+                end = self._expansion(i, depth)
+                if end > start:
+                    add(text[start:end])
+                    i = end
+                    continue
+            if self.heredocs and text.startswith("<<", i) and not text.startswith("<<<", i):
+                end_word()
+                j = i + 2
+                strip_tabs = text.startswith("-", j)
+                if strip_tabs:
+                    j += 1
+                while j < n and text[j] in " \t":
+                    j += 1
+                nl = text.find("\n", j)
+                found = _heredoc_word(text if nl < 0 else text[:nl], j)
+                if found is None:
+                    raise ValueError("a heredoc delimiter this parser does not read")
+                delim, quoted, i = found
+                cur.tokens.append("<<" + ("-" if strip_tabs else "") + delim)
+                pending.append((delim, strip_tabs, quoted, cur))
+                continue
+            if text.startswith("<<<", i):
+                add("<<<")
+                i += 3
+                continue
+            if c in ";&|":
+                # `>&` / `<&` / `>|` / `&>` stay inside the redirection word
+                if (c == "&" and (after_redirect or text.startswith(">", i + 1))) or (
+                    c == "|" and after_redirect and text[i - 1] == ">"
+                ):
+                    add(c)
+                    i += 1
+                    continue
+                end_command()
+                i += 1
+                continue
+            if c == "(":
+                end_command()
+                i = self.parse(i + 1, ")", depth + 1)
+                continue
+            add(c)
+            redirect = c in "<>"
+            i += 1
+        end_command()
+        if closer is not None:
+            raise ValueError("unbalanced `(`")
+        if pending:
+            # bash reads a heredoc never closed as running to the end
+            self._bodies(n, pending, depth)
+        return i
+
+    def _expansion(self, i: int, depth: int) -> int:
+        """Read the substitution or expansion at ``text[i]`` (``$( … )``,
+        backticks, ``<( … )``, ``$(( … ))``, ``$[ … ]``, ``${ … }``) and
+        return the index after it, or ``i`` when there is none."""
+        text = self.text
+        if text.startswith("$((", i):
+            end = _closing(text, i + 3, "(", ")", 2)
+            self._sub(text[i + 3 : end - 2], depth + 1, heredocs=False)
+            return end
+        if text.startswith("$[", i):
+            end = _closing(text, i + 2, "[", "]", 1)
+            self._sub(text[i + 2 : end - 1], depth + 1, heredocs=False)
+            return end
+        if text.startswith("${", i):
+            end = _closing(text, i + 2, "{", "}", 1)
+            self._sub(text[i + 2 : end - 1], depth + 1, heredocs=False)
+            return end
+        if text.startswith(("$(", "<(", ">("), i):
+            return self.parse(i + 2, ")", depth + 1)
+        if text[i] == "`":
+            end = _backtick_end(text, i + 1)
+            self._sub(_unescape_backticks(text[i + 1 : end]), depth + 1)
+            return end + 1
+        return i
+
+    def _double(self, i: int, word: list[str], depth: int) -> int:
+        """Read a double-quoted string from ``text[i]`` into ``word``; return
+        the index after its closing quote."""
+        text, n = self.text, self.n
+        while i < n:
+            c = text[i]
+            if c == '"':
+                return i + 1
+            if c == "\\" and i + 1 < n:
+                nx = text[i + 1]
+                if nx != "\n":
+                    word.append(nx if nx in '$`"\\' else "\\" + nx)
+                i += 2
+                continue
+            if c in "$`":
+                start = i
+                i = self._expansion(i, depth)
+                if i > start:
+                    word.append(text[start:i])
+                    continue
+            word.append(c)
+            i += 1
+        raise ValueError("no closing quotation")
+
+    def _bodies(self, i: int, pending: list[tuple[str, bool, bool, _Command]], depth: int) -> int:
+        """Read the bodies of ``pending`` heredocs from ``text[i]``, one after
+        another; return the index after the last delimiter line."""
+        text, n = self.text, self.n
+        for delim, strip_tabs, quoted, target in pending:
+            lines: list[str] = []
+            while i < n:
+                nl = text.find("\n", i)
+                line = text[i:] if nl < 0 else text[i:nl]
+                i = n if nl < 0 else nl + 1
+                if (line.lstrip("\t") if strip_tabs else line) == delim:
+                    break
+                lines.append(line)
+            body = "\n".join(lines)
+            target.bodies.append(body)
+            if not quoted:
+                self._body_substitutions(body, depth)
+            if _names_guarded(body) and (self.run_bodies or not _is_sink_command(target)):
+                self._sub(body, depth + 1)
+        return i
+
+    def _body_substitutions(self, body: str, depth: int) -> None:
+        """Read the substitutions bash expands in a heredoc body whose
+        delimiter is unquoted; quotes there are plain text."""
+        lexer = _Lexer(body, self.run_bodies)
+        i = 0
+        while i < len(body):
+            if body[i] == "\\":
+                i += 2
+                continue
+            if body[i] in "$`":
+                end = lexer._expansion(i, depth + 1)
+                if end > i:
+                    i = end
+                    continue
+            i += 1
+        self.commands.extend(lexer.commands)
+
+
+# bash's `$'…'` escapes that stand for one fixed character.
+_ANSI_C_SIMPLE = {
+    "a": "\a",
+    "b": "\b",
+    "e": "\x1b",
+    "E": "\x1b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+    "\\": "\\",
+    "'": "'",
+    '"': '"',
+    "?": "?",
+}
+# `\nnn` (octal), `\xHH`, `\uHHHH` and `\UHHHHHHHH`: digits the escape takes.
+_ANSI_C_NUMERIC = {
+    "x": (re.compile(r"[0-9A-Fa-f]{1,2}"), 16),
+    "u": (re.compile(r"[0-9A-Fa-f]{1,4}"), 16),
+    "U": (re.compile(r"[0-9A-Fa-f]{1,8}"), 16),
+}
+_ANSI_C_OCTAL = re.compile(r"[0-7]{1,3}")
+
+
+def _group_opens(tokens: list[str]) -> bool:
+    """Whether a ``{`` read after ``tokens`` opens a group: in command position
+    (only reserved words before it), or as a function's body after
+    ``function name`` (``name()`` already ended its command at the ``(``).
+    ``time`` (with ``-p`` / ``--``) and ``coproc`` (with an optional name) keep
+    command position, as in ``time -p { git push; }`` and ``coproc c { … }``."""
+    i, n = 0, len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if tok == "function":
+            return i == n - 2
+        if tok == "time":
+            i += 1
+            while i < n and tokens[i] in ("-p", "--"):
+                i += 1
+        elif tok == "coproc":
+            # `coproc NAME { … }`: the name is the only word before the group
+            return n - (i + 1) <= 1
+        elif tok in _RESERVED_WORDS:
+            i += 1
+        else:
+            return False
+    return True
+
+
+def _ansi_c_string(text: str, i: int) -> tuple[str, int]:
+    """Decode the ``$'…'`` string whose text starts at ``text[i]`` as bash
+    does; return it and the index after its closing quote. Raises ValueError
+    on ``\\c`` (a control character, which also ends the string's value in
+    some bash versions), on an escape decoding to NUL (bash truncates the word
+    there) and on an unclosed string."""
+    out: list[str] = []
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == "'":
+            decoded = "".join(out)
+            if "\x00" in decoded:
+                raise ValueError("a NUL in a $'…' string")
+            return decoded, i + 1
+        if c != "\\":
+            out.append(c)
+            i += 1
+            continue
+        if i + 1 >= n:
+            break
+        esc = text[i + 1]
+        if esc in _ANSI_C_SIMPLE:
+            out.append(_ANSI_C_SIMPLE[esc])
+            i += 2
+        elif esc in _ANSI_C_NUMERIC:
+            pattern, base = _ANSI_C_NUMERIC[esc]
+            m = pattern.match(text, i + 2)
+            if m is None:
+                out.append("\\" + esc)
+                i += 2
+            else:
+                out.append(chr(int(m.group(), base)))
+                i = m.end()
+        elif m := _ANSI_C_OCTAL.match(text, i + 1):
+            out.append(chr(int(m.group(), 8) & 0xFF))
+            i = m.end()
+        elif esc == "c":
+            raise ValueError("`\\c` in a $'…' string")
+        else:
+            out.append("\\" + esc)
+            i += 2
+    raise ValueError("no closing quotation")
+
+
+def _closing(text: str, i: int, opener: str, closer: str, open_count: int) -> int:
+    """The index after the ``closer`` that balances ``open_count`` openers
+    before ``text[i]``, skipping quoted text and escaped characters."""
+    count, n = open_count, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "'" and opener == "{":
+            end = text.find("'", i + 1)
+            if end < 0:
+                raise ValueError("no closing quotation")
+            i = end + 1
+            continue
+        if c == opener:
+            count += 1
+        elif c == closer:
+            count -= 1
+            if count == 0:
+                return i + 1
+        i += 1
+    raise ValueError(f"unbalanced `{opener}`")
+
+
+def _backtick_end(text: str, i: int) -> int:
+    """The index of the backtick closing one opened before ``text[i]``."""
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == "`":
+            return i
+        i += 1
+    raise ValueError("no closing backtick")
+
+
+def _unescape_backticks(text: str) -> str:
+    """A backtick substitution's command as bash runs it: ``\\```, ``\\\\``
+    and ``\\$`` lose their backslash."""
+    return re.sub(r"\\([`\\$])", r"\1", text)
+
+
+def _is_sink_command(cmd: _Command) -> bool:
+    """Whether ``cmd`` is a bare ``cat`` / ``tee``, the only commands whose
+    heredoc body is read as data when it names a guarded head."""
+    words = [tok for tok in cmd.tokens if tok not in _RESERVED_WORDS]
+    return bool(words) and words[0] in _HEREDOC_DATA_SINKS
+
+
 def split_segments(command: str, _depth: int = 0, _bodies_stripped: bool = False) -> list[Segment]:
-    """Tokenise ``command`` and split it into simple-command segments on shell
-    operators. A shell ``-c <string>`` segment is followed by the segments of
-    its string (see :func:`_shell_segments`).
+    """Split ``command`` into simple-command segments, as bash separates them
+    (see :class:`_Lexer`): on newlines and control operators, spaced or not,
+    and into subshells, groups and substitutions. A leading reserved word
+    (``if``, ``then``, ``{``, ``!`` …) is dropped from its segment. A shell
+    ``-c <string>`` segment is followed by the segments of its string (see
+    :func:`_shell_segments`).
 
     A command that cannot be tokenised yields no segments, unless it names a
     guarded head (``git`` / ``gh`` as a word, after quote removal) or holds an
@@ -623,8 +1067,11 @@ def split_segments(command: str, _depth: int = 0, _bodies_stripped: bool = False
     marked ``untokenised``, which ``dispatch`` refuses, since the guards cannot
     see what such a line runs."""
     try:
-        tokens = shlex.split(command, comments=False)
-    except ValueError:
+        # A heredoc body naming a guarded head is data only where
+        # `_strip_heredoc_bodies` would strip it; elsewhere it may run.
+        run_bodies = _strip_heredoc_bodies(command) == command
+        commands = _Lexer(command, run_bodies).run()
+    except (ValueError, RecursionError):
         without_bodies = command if _bodies_stripped else _strip_heredoc_bodies(command)
         if without_bodies != command:
             # a heredoc body is data, and its apostrophes are not quoting
@@ -635,16 +1082,17 @@ def split_segments(command: str, _depth: int = 0, _bodies_stripped: bool = False
         seg.untokenised = True
         return [seg]
     segments: list[Segment] = []
-    current: list[str] = []
-    for tok in tokens:
-        if tok in SHELL_OPERATORS:
-            if current:
-                segments.extend(_shell_segments(Segment(current, shlex.join(current), command), _depth))
-                current = []
-        else:
-            current.append(tok)
-    if current:
-        segments.extend(_shell_segments(Segment(current, shlex.join(current), command), _depth))
+    for cmd in commands:
+        start = 0
+        while start < len(cmd.tokens) and cmd.tokens[start] in _RESERVED_WORDS:
+            start += 1
+        tokens = cmd.tokens[start:]
+        if not tokens:
+            continue
+        raw = shlex.join(tokens)
+        if cmd.bodies:
+            raw += "\n" + "\n".join(cmd.bodies)
+        segments.extend(_shell_segments(Segment(tokens, raw, command), _depth))
     return segments
 
 
