@@ -285,3 +285,94 @@ def test_release_vote(capsys, tmp_path, data, in_progress):
     assert out["release_vote_in_progress"] is in_progress
     if in_progress:
         assert out["release_vote_thread_url"] == "https://lists/t1"
+
+
+# --- 1d: the advisory archive URL gate ----------------------------------------
+
+SUBJECT = "CVE-2026-12345: Apache Foo: path handling in the log viewer"
+ADVISORY: dict[str, Any] = {
+    "cve_id": "CVE-2026-12345",
+    "advisory_list": "users@foo.apache.org",
+    "mail_archive_url": "https://lists.apache.org",
+    "url": "https://lists.apache.org/thread/abc123",
+    "authorized_senders": ["rm@apache.org", "Sec Member <sec@apache.org>"],
+    "thread": {
+        "list": "<users.foo.apache.org>",
+        "subject": SUBJECT,
+        "from": "Release Manager <RM@apache.org>",
+    },
+}
+
+
+def test_advisory_archive_accepts_the_advisory_thread(capsys, tmp_path) -> None:
+    out = ok(capsys, tmp_path, "advisory-archive", ADVISORY)
+    assert (out["accepted"], out["reasons"], out["requires_confirmation"]) == (True, [], True)
+    assert out["list"] == "users@foo.apache.org"
+    tagged = {
+        **ADVISORY,
+        "thread": {
+            "list": "users@foo.apache.org",
+            "subject": "[ANNOUNCE] CVE-2026-12345: Foo",
+            "from": "sec@apache.org",
+        },
+    }
+    assert ok(capsys, tmp_path, "advisory-archive", tagged)["accepted"] is True
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ({"thread": {"list": "dev@foo.apache.org", "subject": SUBJECT}}, "not on the public"),
+        (
+            {"thread": {"list": "<users.foo.apache.org>", "subject": "Re: CVE-2026-12345: Apache Foo"}},
+            "advisory subject",
+        ),
+        (
+            {"thread": {"list": "<users.foo.apache.org>", "subject": "Question about CVE-2026-12345"}},
+            "advisory subject",
+        ),
+        (
+            {"thread": {"list": "<users.foo.apache.org>", "subject": "CVE-2026-99999: Apache Foo"}},
+            "advisory subject",
+        ),
+        ({"url": "https://example.org/thread/abc123"}, "configured archive"),
+        ({"thread": {}}, "fetch the thread first"),
+        ({"mail_archive_url": None}, "mail_archive_url is not configured"),
+        (
+            {
+                "thread": {
+                    "list": "<users.foo.apache.org>",
+                    "subject": SUBJECT,
+                    "from": '"rm@apache.org" <x@example.org>',
+                }
+            },
+            "not from a release manager",
+        ),
+        (
+            {
+                "thread": {
+                    "list": "<users.foo.apache.org>",
+                    "subject": SUBJECT,
+                    "from": "rm@apache.org, x@example.org",
+                }
+            },
+            "who sent the root message",
+        ),
+        ({"authorized_senders": []}, "no authorized_senders"),
+        (
+            {"thread": {"list": "<users.foo.apache.org>", "subject": SUBJECT, "from": "someone@example.org"}},
+            "not from a release manager",
+        ),
+        ({"thread": {"list": "<users.foo.apache.org>", "subject": SUBJECT}}, "who sent the root message"),
+    ],
+)
+def test_advisory_archive_rejects_other_posts(capsys, tmp_path, change, reason) -> None:
+    out = ok(capsys, tmp_path, "advisory-archive", {**ADVISORY, **change})
+    assert out["accepted"] is False
+    assert any(reason in r for r in out["reasons"]), out["reasons"]
+
+
+def test_advisory_archive_refuses_without_a_list(capsys, tmp_path) -> None:
+    path = tmp_path / "a.json"
+    path.write_text(json.dumps({**ADVISORY, "advisory_list": ""}), encoding="utf-8")
+    assert main(["issue-sync", "advisory-archive", "--input", str(path)]) != 0
