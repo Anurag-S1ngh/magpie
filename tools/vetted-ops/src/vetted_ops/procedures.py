@@ -279,9 +279,48 @@ def _list_comments(r: Runner, number: str) -> list[dict[str, object]]:
     return [c for c in comments if isinstance(c, dict)]
 
 
-def _find_rollup(comments: list[dict[str, object]]) -> dict[str, object] | None:
-    """The rollup comment: the canonical marker first, else a legacy one."""
-    idx = find_rollup_index([str(c.get("body") or "") for c in comments])
+def _comment_author(comment: dict[str, object]) -> str:
+    author = comment.get("author")
+    return str(author.get("login") or "") if isinstance(author, dict) else ""
+
+
+def _trusted_authors(r: Runner) -> tuple[set[str], bool]:
+    """Who may author the rollup: the authenticated login and the tracker's
+    collaborators (the security-team roster), and whether the collaborator
+    list could be read. When it cannot (it needs push access), only the
+    authenticated login."""
+    trusted = {r.read(list(_VIEWER_ARGV)).strip()}
+    complete = True
+    try:
+        out = r.read(["gh", "api", f"repos/{r.tracker}/collaborators", "--paginate", "--jq", ".[].login"])
+    except CommandFailed:
+        complete = False
+    else:
+        trusted |= {line.strip() for line in out.splitlines() if line.strip()}
+    trusted.discard("")
+    return trusted, complete
+
+
+def _find_rollup(r: Runner, comments: list[dict[str, object]]) -> dict[str, object] | None:
+    """The rollup comment: the canonical marker first, else a legacy one.
+
+    Only a comment by a trusted author (see :func:`_trusted_authors`) counts;
+    a marker line in anyone else's comment is ignored. When the collaborator
+    list cannot be read and the first marked comment is someone else's, this
+    refuses rather than risk starting a second rollup.
+    """
+    bodies = [str(c.get("body") or "") for c in comments]
+    first = find_rollup_index(bodies)
+    if first is None:
+        return None
+    authors = [_comment_author(c) for c in comments]
+    trusted, complete = _trusted_authors(r)
+    if not complete and authors[first] not in trusted:
+        raise ProcedureRefused(
+            f"cannot list collaborators of {r.tracker}, so the author of the existing rollup "
+            f"({authors[first] or 'unknown'}) cannot be checked; retry, or run as a user with push access"
+        )
+    idx = find_rollup_index(bodies, authors, trusted)
     return None if idx is None else comments[idx]
 
 
@@ -324,7 +363,7 @@ def _write_entry(r: Runner, number: str, entry: str) -> tuple[str, str]:
 
     Returns a summary and the rollup comment's URL (empty in a dry run).
     """
-    rollup = _find_rollup(_list_comments(r, number))
+    rollup = _find_rollup(r, _list_comments(r, number))
     if rollup is None:
         out = r.write(
             ["gh", "issue", "comment", number, "--repo", r.tracker, "--body-file", "-"],
@@ -360,7 +399,7 @@ def rollup_append(r: Runner, *, number: str, action: str, text: str, date: str |
 
 
 def rollup_amend_latest(r: Runner, *, number: str, action: str, text: str) -> int:
-    rollup = _find_rollup(_list_comments(r, number))
+    rollup = _find_rollup(r, _list_comments(r, number))
     if rollup is None:
         raise ProcedureRefused(f"no rollup on {r.tracker}#{number}")
     existing = str(rollup.get("body") or "")
