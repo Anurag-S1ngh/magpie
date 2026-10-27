@@ -498,6 +498,26 @@ def test_compound_command_other_segment_not_denied():
         "cd /tmp && /usr/bin/git push --force \\",
         # Inside a shell `-c` string.
         """bash -c "git commit -m 'oops" """,
+        # Quoting and escapes inside the word: bash still runs git / gh.
+        "g'i't push --force # it's",
+        '"g"h pr merge 5 # it\'s',
+        "g\\it push --force # it's",
+        "$'gh' pr merge 5 # it's",
+        "/usr/bin/gi''t push --force # it's",
+        "g\\\nit push --force # it's",
+        "$'g'h pr merge 5 # it's",
+        '$"g"h pr merge 5 # it\'s',
+        # Expansions that may be empty: the guards cannot see the word.
+        "g$()it push --force # it's",
+        "g${x:-}it push --force # it's",
+        "g``it push --force # it's",
+        "g$@it push --force # it's",
+        "$CMD push --force # it's",
+        # Globs and brace expansion can resolve to git / gh.
+        "/usr/bin/gi? push --force # it's",
+        "/usr/bin/g*t push --force # it's",
+        "/usr/bin/g[i]t push --force # it's",
+        "/usr/bin/g{i,}t push --force # it's",
     ],
 )
 def test_untokenisable_command_naming_a_guarded_head_is_refused(command):

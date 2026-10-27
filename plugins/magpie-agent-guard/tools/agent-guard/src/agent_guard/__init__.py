@@ -170,6 +170,19 @@ _SHELL_LONG_VALUE = frozenset({"rcfile", "init-file"})
 # A guarded head anywhere in a command line, as a word: what makes a line that
 # cannot be tokenised worth refusing rather than letting through.
 _GUARDED_WORD_RE = re.compile(r"\b(?:git|gh)\b")
+# Quoting bash removes from a word before running it (`g'i't`, `"g"h`, `g\it`,
+# `g\<newline>it`, `$'g'h`).
+_QUOTING_RE = re.compile(r"\\\n|\$(?=['\"])|['\"\\]")
+# An expansion, a glob or a line continuation: on a line that cannot be
+# tokenised it may build any word (`g$()it`, `$CMD`, `/usr/bin/gi?`,
+# `g{i,}t`), so such a line is refused outright.
+_EXPANSION_RE = re.compile(r"[$`*?\[{]|\\\n")
+
+
+def _names_guarded(text: str) -> bool:
+    """Whether ``text`` names ``git`` / ``gh`` as a word once bash's quote
+    removal has run, so quoting inside the word does not hide it."""
+    return bool(_GUARDED_WORD_RE.search(_QUOTING_RE.sub("", text)))
 
 
 def _truthy(val: str | None) -> bool:
@@ -568,7 +581,7 @@ def _strip_heredoc_bodies(command: str) -> str:
                 pending.pop(0)
                 text = "\n".join(body)
                 all_sinks = all_sinks and sink
-                if _GUARDED_WORD_RE.search(text):
+                if _names_guarded(text):
                     expands = not quoted and _SUBSTITUTION_RE.search(text)
                     if expands or not sink:
                         return command
@@ -602,7 +615,8 @@ def split_segments(command: str, _depth: int = 0, _bodies_stripped: bool = False
     its string (see :func:`_shell_segments`).
 
     A command that cannot be tokenised yields no segments, unless it names a
-    guarded head (``git`` / ``gh`` as a word): then it yields one segment
+    guarded head (``git`` / ``gh`` as a word, after quote removal) or holds an
+    expansion or line continuation that could build one: then it yields one segment
     marked ``untokenised``, which ``dispatch`` refuses, since the guards cannot
     see what such a line runs."""
     try:
@@ -612,7 +626,7 @@ def split_segments(command: str, _depth: int = 0, _bodies_stripped: bool = False
         if without_bodies != command:
             # a heredoc body is data, and its apostrophes are not quoting
             return split_segments(without_bodies, _depth, _bodies_stripped=True)
-        if not _GUARDED_WORD_RE.search(command):
+        if not _names_guarded(command) and not _EXPANSION_RE.search(command):
             return []
         seg = Segment([], command, command)
         seg.untokenised = True
@@ -732,7 +746,7 @@ def _shell_segments(seg: Segment, depth: int) -> list[Segment]:
     if script is None:
         return [seg]
     if depth >= _SHELL_DEPTH:
-        if _GUARDED_WORD_RE.search(script):
+        if _names_guarded(script):
             seg.unparsed = True
         return [seg]
     inner = split_segments(script, depth + 1)
@@ -2193,10 +2207,11 @@ def dispatch(command: str, cwd: str | None = None, harness: str | None = None) -
     for seg in split_segments(command):
         if seg.untokenised and not seg.override():
             return (
-                "agent-guard[parse]: this command names `git` / `gh` but its quoting cannot be "
-                "parsed (an unbalanced quote or a trailing backslash), so the guards cannot see "
-                "what it runs. Simplify the quoting: put a long or multi-line message in a file "
-                "and pass it with `-F <file>` / `--body-file <file>`."
+                "agent-guard[parse]: this command names `git` / `gh`, or holds an expansion that "
+                "could build either, but its quoting cannot be parsed (an unbalanced quote or a "
+                "trailing backslash), so the guards cannot see what it runs. Simplify the quoting: "
+                "put a long or multi-line message in a file and pass it with `-F <file>` / "
+                "`--body-file <file>`."
             )
         if seg.unparsed and not seg.override():
             return (
