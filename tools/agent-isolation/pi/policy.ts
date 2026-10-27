@@ -183,6 +183,11 @@ export class Policy {
 		);
 	}
 
+	/** Whether `path`, or the target a link in it leads to, is `base` or inside it. */
+	pathUnder(path: string, base: string, cwd: string): boolean {
+		return candidates(path, cwd).some((c) => pathMatches(base, c, cwd));
+	}
+
 	/** Why a native write of `path` is refused, or null. */
 	writeDenied(path: string, cwd: string): string | null {
 		const read = this.readDenied(path, cwd);
@@ -214,10 +219,10 @@ export class Policy {
 				deniedDomains: [],
 			},
 			filesystem: {
-				denyRead: (sb.filesystem?.denyRead ?? []).map((p) => expandPath(p, cwd)),
-				allowRead: (sb.filesystem?.allowRead ?? []).map((p) => expandPath(p, cwd)),
-				allowWrite: [cwd, tmpdir(), "/tmp", ...(sb.filesystem?.allowWrite ?? [])].map((p) => expandPath(p, cwd)),
-				denyWrite: [...editDenies, ...PI_CONFIG_PATHS.map((p) => expandPath(p, cwd))],
+				denyRead: withReal((sb.filesystem?.denyRead ?? []).map((p) => expandPath(p, cwd))),
+				allowRead: withSystemReal((sb.filesystem?.allowRead ?? []).map((p) => expandPath(p, cwd))),
+				allowWrite: withSystemReal([cwd, tmpdir(), "/tmp", ...(sb.filesystem?.allowWrite ?? [])].map((p) => expandPath(p, cwd))),
+				denyWrite: withReal([...editDenies, ...PI_CONFIG_PATHS.map((p) => expandPath(p, cwd))]),
 			},
 			credentials: { envVars: sb.credentials?.envVars ?? [] },
 			enableWeakerNetworkIsolation: sb.network?.enableWeakerNetworkIsolation,
@@ -228,7 +233,9 @@ export class Policy {
 /**
  * The paths a file tool would really touch: the literal one, and its target
  * with every symlink resolved (for a file that does not exist yet, through
- * its nearest existing parent), so a link cannot reach a denied path.
+ * its nearest existing parent), so a link cannot reach a denied path. The
+ * native realpath also returns the on-disk letter case, so `~/.SSH` on a
+ * case-insensitive filesystem is checked as `~/.ssh`.
  */
 export function candidates(path: string, cwd: string, depth = 0): string[] {
 	const literal = expandPath(path, cwd);
@@ -250,11 +257,46 @@ export function candidates(path: string, cwd: string, depth = 0): string[] {
 	}
 	let real: string;
 	try {
-		real = rest ? join(realpathSync(existing), rest) : realpathSync(existing);
+		real = rest ? join(realpathSync.native(existing), rest) : realpathSync.native(existing);
 	} catch {
 		return [literal];
 	}
 	return real === literal ? [literal] : [literal, real];
+}
+
+/**
+ * Each allow entry plus its form under macOS's fixed system links (`/tmp`,
+ * `/var` and `/etc` are `/private/...`), which the OS sandbox matches by
+ * their resolved path. Nothing else is resolved: a link the agent could
+ * plant in an allowed directory must not widen the grant on the next launch.
+ */
+export function withSystemReal(paths: string[]): string[] {
+	const out: string[] = [];
+	for (const p of paths) {
+		if (!out.includes(p)) out.push(p);
+		const fixed = /^\/(tmp|var|etc)(\/|$)/.test(p) && existsSync(`/private${p.slice(0, 4)}`) ? `/private${p}` : null;
+		if (fixed && !out.includes(fixed)) out.push(fixed);
+	}
+	return out;
+}
+
+/**
+ * Each deny entry plus its resolved form where it differs, so a denial
+ * spelled through a link still covers what a process touches. Resolving can
+ * only widen a deny list, never an allow list (see withSystemReal).
+ */
+export function withReal(paths: string[]): string[] {
+	const out: string[] = [];
+	for (const p of paths) {
+		if (!out.includes(p)) out.push(p);
+		try {
+			const real = realpathSync.native(p);
+			if (!out.includes(real)) out.push(real);
+		} catch {
+			// Not there yet: nothing to resolve.
+		}
+	}
+	return out;
 }
 
 function isSymlink(path: string): boolean {
@@ -320,7 +362,7 @@ function realPrefix(base: string): string {
 		dir = dirname(dir);
 	}
 	try {
-		const real = realpathSync(dir);
+		const real = realpathSync.native(dir);
 		return real === "/" ? rest || "/" : `${real}${rest}`;
 	} catch {
 		return base;
