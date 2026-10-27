@@ -226,12 +226,17 @@ See `docs/adapters/goose.md`.
   option or another `command` flag, is marked unparsed and refused, and
   `env -S` is refused outright, because GNU env splits its string with
   escapes `shlex` does not reproduce (#1691, #1694).
-  A shell's `-c` string (`bash` / `sh` / `zsh -c`) is split and checked
+  A shell's `-c` string (`bash` / `sh` / `zsh -c`), or `eval`'s arguments (after one `--`; an `eval` with an option is refused), is split and checked
   as a command line of its own, one level deep; a nested `-c` string
   naming `git` or `gh` is refused, as is a line whose quoting cannot be
   parsed when it names `git` or `gh`; a heredoc body is not read as
   shell syntax unless it names `git` / `gh` and is fed to anything but
-  `cat` / `tee`. Per-guard `MAGPIE_ALLOW_*`
+  a bare `cat` / `tee` starting its own command, in a command that
+  without its heredoc bodies has no `$`, backtick, parenthesis, brace,
+  `alias`, or `eval` / `source` / `.` / `hash` / `enable` as a word anywhere (after quote removal) and no non-sink heredoc, or holds a `$(…)` / backtick substitution under
+  an unquoted delimiter; a `<<` inside quotes, a `#` comment, arithmetic
+  or a `${…}` expansion opens no heredoc, and the delimiter is the whole
+  word after quote removal. Per-guard `MAGPIE_ALLOW_*`
   overrides are honoured inline or from the hook's environment;
   `MAGPIE_GUARD_OFF` is read from the hook's environment only, never
   from the command line.

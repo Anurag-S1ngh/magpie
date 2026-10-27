@@ -151,7 +151,7 @@ includes `env -S` / `--split-string`: env splits that string with its own
 escapes (`\_`, `\c`, `${VAR}`), so the guards could not be sure they see the
 command env runs.
 
-A shell's `-c` string (`bash -c "…"`, `sh -c '…'`, `zsh -lc "…"`) is split
+A shell's `-c` string (`bash -c "…"`, `sh -c '…'`, `zsh -lc "…"`), or the joined arguments of `eval` (after one `--`; also behind any chain of `builtin`, `command`, `--` and `-p`; an option anywhere else in front of the string is refused), is split
 and checked like a command line of its own, and inherits the inline
 assignments written before the shell. That goes one level deep: a `-c` string
 inside a `-c` string that names `git` or `gh` is refused (`agent-guard[wrapper]`).
@@ -163,7 +163,21 @@ quoting, for example by passing a multi-line message with `-F <file>` /
 `--body-file <file>`. Any other unparsable line is allowed, as before.
 A heredoc's body is data, not shell syntax: an apostrophe in it does not make
 the line unparsable. That holds for a body naming `git` or `gh` only when it is
-fed to `cat` or `tee`, and never for a heredoc that is not closed.
+fed to a bare `cat`, `/bin/cat`, `/usr/bin/cat` or `tee` (plain file arguments
+and `>` / `>>` only) that starts a command rather than continuing the line
+before, in a command that, without its heredoc bodies, holds no `$`, backtick,
+parenthesis or brace, no `alias`, and no `eval`, `source`, `.`, `hash` or
+`enable` as a word anywhere (after quote removal), in which every other heredoc
+is such a sink too, and,
+under an unquoted delimiter, holds no `$(…)` or backtick substitution (bash
+runs those); never for a heredoc that is not closed.
+A `<<` inside quotes, a `#` comment, arithmetic (`$((…))`, `$[…]`) or a
+`${…}` expansion opens no heredoc, so the lines after it are read as commands,
+as bash reads them. The delimiter is the whole word after quote removal
+(`E"O"F` is `EOF`); a delimiter holding `$` or a backtick is not stripped.
+The guard reads one command string, so a `cat` heredoc that writes a script
+which a later command runs is beyond it: the agent could write that file with
+its own file tools just as well.
 
 ## Per-command overrides
 

@@ -400,52 +400,200 @@ class Segment:
 # --------------------------------------------------------------------------- #
 
 
-_HEREDOC_RE = re.compile(r"(?<!<)<<(-?)(?!<)\s*(['\"]?)([A-Za-z_][\w.-]*)\2")
+# Characters that end a shell word, and after which a `#` starts a comment.
+_SHELL_META = frozenset(" \t;&|()<>")
+# Arithmetic and parameter expansion, inside which `<<` is a shift.
+_ARITHMETIC_OPENERS = ("$((", "((", "$[", "${")
+# Command substitution, which bash still runs inside the body of a heredoc
+# whose delimiter is unquoted.
+_SUBSTITUTION_RE = re.compile(r"\$\(|`")
+# One heredoc a line opens: (delimiter, strip_tabs, quoted).
+_Heredoc = tuple[str, bool, bool]
+
+
+def _heredoc_word(line: str, i: int) -> tuple[str, bool, int] | None:
+    """The heredoc delimiter starting at ``line[i]``, as bash reads it: the
+    whole word up to the next metacharacter, after quote removal. Returns
+    ``(delimiter, quoted, end)``, or None for a word this parser does not
+    reproduce (empty, unclosed, or holding an expansion)."""
+    word: list[str] = []
+    quoted = False
+    n = len(line)
+    while i < n and line[i] not in _SHELL_META:
+        ch = line[i]
+        if ch == "\\":
+            if i + 1 >= n:
+                return None
+            word.append(line[i + 1])
+            i += 2
+        elif ch in "'\"":
+            end = line.find(ch, i + 1)
+            if end < 0 or (ch == '"' and "\\" in line[i + 1 : end]):
+                return None
+            word.append(line[i + 1 : end])
+            i = end + 1
+        elif ch in "$`":
+            return None
+        else:
+            word.append(ch)
+            i += 1
+            continue
+        quoted = True
+    if not word:
+        return None
+    return "".join(word), quoted, i
+
+
+def _heredocs_opened(line: str, quote: str | None) -> tuple[list[_Heredoc], str | None, str] | None:
+    """The heredocs ``line`` opens, the quote still open at its end, and
+    ``line`` without its heredoc operators.
+
+    ``quote`` is the quote open when ``line`` starts (``'``, ``"``, ``$'`` or
+    None). A ``<<`` inside quotes or a ``#`` comment opens no heredoc: bash
+    reads the lines after it as commands. None when the line has a ``<<``
+    this parser cannot place: inside arithmetic or a parameter expansion, or
+    before a delimiter it does not reproduce."""
+    found: list[_Heredoc] = []
+    rest: list[str] = []
+    i = kept = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+        elif quote in ('"', "$'"):
+            if ch == "\\":
+                i += 1
+            elif ch == quote[-1]:
+                quote = None
+        elif ch == "\\":
+            i += 1
+        elif ch in "'\"":
+            quote = ch
+        elif line.startswith("$'", i):
+            quote = "$'"
+            i += 1
+        elif ch == "#" and (i == 0 or line[i - 1] in _SHELL_META):
+            break
+        elif line.startswith(_ARITHMETIC_OPENERS, i) and "<<" in line[i:]:
+            return None
+        elif line.startswith("<<<", i):
+            i += 3
+            continue
+        elif line.startswith("<<", i):
+            start = i
+            i += 2
+            strip_tabs = line.startswith("-", i)
+            if strip_tabs:
+                i += 1
+            while i < n and line[i] in " \t":
+                i += 1
+            word = _heredoc_word(line, i)
+            if word is None:
+                return None
+            delim, quoted, i = word
+            found.append((delim, strip_tabs, quoted))
+            rest.append(line[kept:start])
+            kept = i
+            continue
+        i += 1
+    rest.append(line[kept:])
+    return found, quote, " ".join(rest)
 
 
 # Commands that only store what a heredoc feeds them. A body naming a guarded
-# head is stripped only when one of these opens the introducing line; fed to
-# anything else, it may be run.
-_HEREDOC_DATA_SINKS = frozenset({"cat", "tee"})
-# Something on the introducing line that hands the sink's output on: a pipe,
-# a process or command substitution, a further command.
-_PASSES_ON_RE = re.compile(r"[|;&`]|<\(|>\(|\$\(")
+# head is stripped only in the narrowest shape known to be data: the
+# introducing line starts a command and is one of these, exactly, with plain
+# file arguments and redirections, and the rest of the command has nothing
+# that could run the output or redefine the sink. Anything else may run the
+# body, so the command is kept whole.
+_HEREDOC_DATA_SINKS = frozenset({"cat", "tee", "/bin/cat", "/usr/bin/cat"})
+_SINK_ARG_RE = re.compile(r"(?:>>?)?[\w./~+-]*")
+# Line endings that carry the command on to the next line.
+_CONTINUED_RE = re.compile(r"(?:\\|\||&&)\s*$")
+# In the command without its heredoc bodies: an expansion, a substitution, a
+# subshell, group or function, or an alias. Any of these rules out stripping a
+# body that names a guarded head, since the sink's output may be run or the
+# sink may not be `cat`.
+_SINK_DEFEATED_RE = re.compile(r"[$`(){}]|\balias\b")
+# The same, for a word that can run a file or redefine a command, anywhere in
+# the command after quote and backslash removal (`xargs e'v'al`, `env . s`).
+_SINK_DEFEATING_WORD_RE = re.compile(r"(?<![\w./-])(?:eval|source|hash|enable|\.)(?![\w./-])")
+_QUOTE_CHARS_RE = re.compile(r"['\"\\]")
+
+
+def _sink_defeated(stripped: str) -> bool:
+    """Whether ``stripped`` (a command without its heredoc bodies) could run a
+    sink's output or redefine the sink (see ``_SINK_DEFEATED_RE``)."""
+    if _SINK_DEFEATED_RE.search(stripped):
+        return True
+    return bool(_SINK_DEFEATING_WORD_RE.search(_QUOTE_CHARS_RE.sub("", stripped)))
+
+
+def _is_data_sink(intro: str, previous: str | None) -> bool:
+    """Whether ``intro``, without its heredoc operators, is a bare ``cat`` /
+    ``tee`` with only plain words and ``>`` / ``>>`` redirections after it,
+    starting a command rather than continuing ``previous``."""
+    if previous is not None and _CONTINUED_RE.search(previous):
+        return False
+    words = intro.split()
+    if not words or words[0] not in _HEREDOC_DATA_SINKS:
+        return False
+    return all(_SINK_ARG_RE.fullmatch(word) for word in words[1:])
 
 
 def _strip_heredoc_bodies(command: str) -> str:
     """``command`` with each heredoc's body and closing delimiter line removed,
     so text that is only fed to a command's stdin is not read as shell syntax.
 
-    ``command`` comes back unchanged when a heredoc is never closed, or when a
-    body naming ``git`` / ``gh`` is fed to anything but a plain data sink
-    (``cat`` / ``tee`` opening the introducing line): it may be a script."""
+    ``command`` comes back unchanged when a heredoc is never closed, when a
+    ``<<`` cannot be placed (see :func:`_heredocs_opened`), or when a body
+    naming ``git`` / ``gh`` may run: fed to anything but a bare ``cat`` /
+    ``tee``, holding a command substitution under an unquoted delimiter,
+    which bash expands, in a command whose other lines could run the sink's
+    output (see :func:`_sink_defeated`), or next to any heredoc that is not a
+    sink: its body is stripped too, and may redefine the sink."""
     out: list[str] = []
-    pending: list[tuple[str, bool]] = []
-    intro = ""
+    pending: list[_Heredoc] = []
+    quote: str | None = None
+    sink = False
+    guarded = False
+    all_sinks = True
     body: list[str] = []
     for line in command.split("\n"):
         if pending:
-            delim, strip_tabs = pending[0]
+            delim, strip_tabs, quoted = pending[0]
             if (line.lstrip("\t") if strip_tabs else line) == delim:
                 pending.pop(0)
-                head = os.path.basename(intro.split(maxsplit=1)[0]) if intro.strip() else ""
-                sink = head in _HEREDOC_DATA_SINKS and not _PASSES_ON_RE.search(intro)
-                if _GUARDED_WORD_RE.search("\n".join(body)) and not sink:
-                    return command
+                text = "\n".join(body)
+                all_sinks = all_sinks and sink
+                if _GUARDED_WORD_RE.search(text):
+                    expands = not quoted and _SUBSTITUTION_RE.search(text)
+                    if expands or not sink:
+                        return command
+                    guarded = True
                 body = []
             else:
                 body.append(line)
             continue
+        previous = out[-1] if out else None
         out.append(line)
-        intro = line
-        pending = [(m.group(3), m.group(1) == "-") for m in _HEREDOC_RE.finditer(line)]
+        opened = _heredocs_opened(line, quote)
+        if opened is None:
+            return command
+        pending, quote, rest = opened
         if pending and line.rstrip().endswith("\\"):
             # a continued line: the body starts after the logical line ends,
             # which this reader does not follow
             return command
+        sink = _is_data_sink(rest, previous)
     if pending:
         return command
-    return "\n".join(out)
+    stripped = "\n".join(out)
+    if guarded and (not all_sinks or _sink_defeated(stripped)):
+        return command
+    return stripped
 
 
 def split_segments(command: str, _depth: int = 0, _bodies_stripped: bool = False) -> list[Segment]:
@@ -483,9 +631,52 @@ def split_segments(command: str, _depth: int = 0, _bodies_stripped: bool = False
     return segments
 
 
+# Words `eval` may sit behind: `builtin command -- eval …`, `command -p eval …`.
+_EVAL_PREFIXES = frozenset({"builtin", "command", "--", "-p"})
+
+
+def _eval_call(argv: list[str]) -> tuple[list[str] | None, bool]:
+    """The arguments of an ``eval`` behind any chain of ``builtin`` /
+    ``command`` / ``--`` / ``-p``, after one leading ``--``, and whether the
+    call is one the guards do not parse: an ``eval`` with an option, or an
+    option in the prefix chain. ``(None, False)`` when ``argv`` is no ``eval``.
+    """
+    i = 0
+    while i < len(argv) and argv[i] in _EVAL_PREFIXES:
+        i += 1
+    if i < len(argv) and argv[i] != "eval":
+        # an unknown option behind `builtin` / `command`, in front of an eval
+        if i and argv[i].startswith("-") and "eval" in argv[i:]:
+            return None, True
+        return None, False
+    if i == len(argv):
+        return None, False
+    args = argv[i + 1 :]
+    if args[:1] == ["--"]:
+        args = args[1:]
+    elif args and args[0].startswith("-") and args[0] != "-":
+        return args, True
+    return args, False
+
+
+def _eval_args(argv: list[str]) -> list[str] | None:
+    """The arguments of ``eval`` (see :func:`_eval_call`), or None."""
+    return _eval_call(argv)[0]
+
+
+def _eval_has_option(argv: list[str]) -> bool:
+    """Whether ``argv`` is an ``eval`` the guards do not parse: bash rejects
+    an option there, and the guards do not guess at it."""
+    return _eval_call(argv)[1]
+
+
 def _shell_script(argv: list[str]) -> str | None:
-    """The ``<string>`` of ``bash|sh|zsh [options] -c <string> …``, or None when
-    ``argv`` is not such a call (a script, an interactive shell)."""
+    """The ``<string>`` of ``bash|sh|zsh [options] -c <string> …``, or of
+    ``eval <args>…`` (its arguments joined by spaces, as bash joins them), or
+    None when ``argv`` is not such a call (a script, an interactive shell)."""
+    args = _eval_args(argv)
+    if args is not None:
+        return " ".join(args) or None
     if not argv or argv[0] not in _SHELLS:
         return None
     args = argv[1:]
@@ -531,8 +722,12 @@ def _shell_segments(seg: Segment, depth: int) -> list[Segment]:
 
     The string's segments inherit ``seg``'s inline assignments (the shell
     exports them to what it runs) and count as wrapped. Past ``_SHELL_DEPTH``
-    a ``-c`` string that names a guarded head marks ``seg`` unparsed instead.
+    a ``-c`` string that names a guarded head marks ``seg`` unparsed instead,
+    as does an ``eval`` with an option.
     """
+    if _eval_has_option(seg.argv):
+        seg.unparsed = True
+        return [seg]
     script = _shell_script(seg.argv)
     if script is None:
         return [seg]

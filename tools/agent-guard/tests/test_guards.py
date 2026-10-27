@@ -576,6 +576,185 @@ def test_heredoc_that_runs_or_never_closes_is_not_stripped(command):
     assert reason and "agent-guard[parse]" in reason
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        # `<<EOF` inside a comment or quotes opens no heredoc: bash runs the
+        # next line as a command.
+        "cat /dev/null # <<EOF it's\ngit push --force\nEOF",
+        "cat /dev/null '<<EOF' # it's\ngit push --force\nEOF",
+        "cat /dev/null \"<<EOF\" $'it\\'s'\ngit push --force\nEOF",
+        # A quote opened on an earlier line is still open.
+        "echo 'x\ncat <<EOF' # it's\ngit push --force\nEOF",
+    ],
+)
+def test_heredoc_operator_in_a_comment_or_quotes_is_not_a_heredoc(command):
+    reason = dispatch(command)
+    assert reason and "agent-guard[parse]" in reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat <<EOF\nit's $(git push --force)\nEOF",
+        "cat <<EOF > notes.md\nit's `gh pr merge 5`\nEOF",
+    ],
+)
+def test_unquoted_heredoc_body_substitution_is_not_stripped(command):
+    reason = dispatch(command)
+    assert reason and "agent-guard[parse]" in reason
+
+
+def test_quoted_heredoc_body_substitution_is_data():
+    assert dispatch("cat <<'EOF' > notes.md\nit's $(git log) in the docs\nEOF") is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # `<<` as a shift operator opens no heredoc.
+        "cat /dev/null $((1<<x)) # it's\ngit push --force\nx",
+        "cat /dev/null $[1<<x] # it's\ngit push --force\nx",
+        "cat /dev/null ${a[1<<x]} # it's\ngit push --force\nx",
+    ],
+)
+def test_shift_operator_is_not_a_heredoc(command):
+    reason = dispatch(command)
+    assert reason and "agent-guard[parse]" in reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # bash's delimiter is the whole word after quote removal: `E-O:F`,
+        # `EOF`; a shorter one would close the body too late.
+        "cat <<E-O:F # it's\nE-O:F\ngit push --force\nE-O",
+        "cat <<'E'OF # it's\nEOF\ngit push --force\nE",
+        'cat <<E"O"F # it\'s\nEOF\ngit push --force\nE',
+    ],
+)
+def test_heredoc_delimiter_is_the_whole_word(command):
+    reason = dispatch(command)
+    assert reason and "agent-guard[parse]" in reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat <<'E'OF > notes.md\nthe user's git notes\nEOF",
+        "cat <<\\EOF > notes.md\nthe user's git notes\nEOF",
+        "tee -a notes.md <<'EOF'\nthe user's git notes\nEOF",
+    ],
+)
+def test_heredoc_with_a_quoted_delimiter_word_is_data(command):
+    assert dispatch(command) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A body naming git / gh is stripped only for a bare `cat` / `tee`.
+        "cat $(echo x) <<'EOF'\nthe user's git notes\nEOF",
+        "cat <<'EOF' > \"$f\"\nthe user's git notes\nEOF",
+        "x/cat <<'EOF'\nthe user's git notes\nEOF",
+        # A `<<` inside arithmetic opened on an earlier line.
+        "echo $((1 +\ncat <<x)) # it's\ngit push --force\nx",
+        # The intro continues the previous line: `bash -s` runs stdin.
+        "bash -s \\\ncat <<'EOF'\nit's\ngit push --force\nEOF",
+        # `cat` redefined as a function or alias.
+        "cat() { bash; }\ncat <<'EOF'\nit's\ngit push --force\nEOF",
+        "alias cat=bash\ncat <<'EOF'\nit's\ngit push --force\nEOF",
+        # The cat output is run: substitution, process substitution, eval,
+        # or a group piped to a shell.
+        "$(cat <<'EOF'\nit's\ngit push --force\nEOF\n)",
+        "`cat <<'EOF'\nit's\ngit push --force\nEOF\n`",
+        "eval \"$(cat <<'EOF'\nit's\ngit push --force\nEOF\n)\"",
+        "bash <(cat <<'EOF'\nit's\ngit push --force\nEOF\n)",
+        "(\ncat <<'EOF'\nit's\ngit push --force\nEOF\n) | bash",
+        "{\ncat <<'EOF'\nit's\ngit push --force\nEOF\n} | bash",
+    ],
+)
+def test_heredoc_sink_must_be_a_bare_cat_or_tee(command):
+    reason = dispatch(command)
+    assert reason and "agent-guard[parse]" in reason
+
+
+def test_eval_string_is_checked_like_a_shell_c_string():
+    assert dispatch("""eval 'git commit -m "x\nCo-Authored-By: a"'""") is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        """eval -- 'git commit -m "x\nCo-Authored-By: a"'""",
+        """builtin eval 'git commit -m "x\nCo-Authored-By: a"'""",
+        """command eval 'git commit -m "x\nCo-Authored-By: a"'""",
+    ],
+)
+def test_eval_spellings_are_checked_like_eval(command):
+    assert dispatch(command) is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        """builtin command -- eval 'git commit -m "x\nCo-Authored-By: a"'""",
+        """command -p eval 'git commit -m "x\nCo-Authored-By: a"'""",
+    ],
+)
+def test_eval_behind_a_prefix_chain_is_checked(command):
+    assert dispatch(command) is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "eval -x 'git push --force'",
+        "command -x eval 'git push --force'",
+        "builtin -x eval 'git push --force'",
+    ],
+)
+def test_eval_with_an_option_is_refused(command):
+    reason = dispatch(command)
+    assert reason and "agent-guard[wrapper]" in reason
+
+
+def test_command_lookup_is_not_an_eval():
+    assert dispatch("command -v gh") is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Anywhere in the rest of the command, after quote removal.
+        "cat <<'EOF' > s\nit's\ngit push --force\nEOF\nxargs e'v'al < s",
+        "cat <<'EOF' > s\nit's\ngit push --force\nEOF\nenv source s",
+        "cat <<'EOF' > s\nit's\ngit push --force\nEOF\nenv . s",
+        "hash -p /bin/bash cat\ncat <<'EOF'\nit's\ngit push --force\nEOF",
+        "enable -f x.so cat\ncat <<'EOF'\nit's\ngit push --force\nEOF",
+    ],
+)
+def test_heredoc_body_is_kept_next_to_eval_source_hash_or_enable(command):
+    reason = dispatch(command)
+    assert reason and "agent-guard[parse]" in reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A non-sink heredoc body redefines `cat` before the stripped one.
+        "bash <<'A'\ncat(){ bash; }\nA\ncat <<'EOF'\nit's\ngit push --force\nEOF",
+        # `eval` / `source` / `.` behind a prefix.
+        "builtin source x\ncat <<'EOF'\nit's\ngit push --force\nEOF",
+        "command . x\ncat <<'EOF'\nit's\ngit push --force\nEOF",
+        "X=1 eval x\ncat <<'EOF'\nit's\ngit push --force\nEOF",
+    ],
+)
+def test_heredoc_body_is_stripped_only_when_every_heredoc_is_a_sink(command):
+    reason = dispatch(command)
+    assert reason and "agent-guard[parse]" in reason
+
+
 def test_shell_option_value_letters_are_not_flags():
     # `c` inside zsh's attached option value is not `-c`
     assert dispatch("zsh -onocorrect script.zsh") is None
