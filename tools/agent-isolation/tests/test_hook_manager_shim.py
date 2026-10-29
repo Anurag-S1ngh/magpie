@@ -108,8 +108,28 @@ def test_overcommit_install_help_passes_through(tmp_path: Path) -> None:
     assert (tmp_path / "env").read_text().splitlines() == ["", "", ""]
 
 
-def test_a_linked_worktree_targets_the_main_checkout(tmp_path: Path) -> None:
-    env, argv = _setup(tmp_path)
+def test_captainhook_install_targets_the_common_hooks_dir(tmp_path: Path) -> None:
+    env, argv = _setup(tmp_path, name="captainhook")
+    repo = _repo(tmp_path)
+    assert _run(env, repo, "install", name="captainhook").returncode == 0
+    assert argv.read_text().splitlines() == ["install"]
+    assert (tmp_path / "env").read_text().splitlines() == [
+        "1",
+        "core.hooksPath",
+        f"{_common_dir(repo)}/hooks",
+    ]
+
+
+def test_captainhook_other_subcommands_pass_through(tmp_path: Path) -> None:
+    env, argv = _setup(tmp_path, name="captainhook")
+    repo = _repo(tmp_path)
+    assert _run(env, repo, "hook:pre-commit", name="captainhook").returncode == 0
+    assert argv.read_text().splitlines() == ["hook:pre-commit"]
+    assert (tmp_path / "env").read_text().splitlines() == ["", "", ""]
+
+
+def _worktree(tmp_path: Path) -> Path:
+    """A linked worktree of a repo that has one commit, so `git worktree add` works."""
     repo = _repo(tmp_path)
     # A developer's global commit.gpgsign would make this commit wait for (or
     # fail on) their signing key; the throwaway repo has nothing to sign.
@@ -139,11 +159,29 @@ def test_a_linked_worktree_targets_the_main_checkout(tmp_path: Path) -> None:
     subprocess.run(
         ["git", "-C", str(repo), "worktree", "add", "-q", str(worktree)], check=True
     )
+    return worktree
+
+
+def test_a_linked_worktree_targets_the_main_checkout(tmp_path: Path) -> None:
+    env, argv = _setup(tmp_path)
+    worktree = _worktree(tmp_path)
     assert _run(env, worktree, "install").returncode == 0
     assert argv.read_text().splitlines() == [
         "install",
         "--git-dir",
-        str((repo / ".git").resolve()),
+        str((tmp_path / "repo" / ".git").resolve()),
+    ]
+
+
+def test_captainhook_in_a_linked_worktree_targets_the_main_checkout(tmp_path: Path) -> None:
+    env, argv = _setup(tmp_path, name="captainhook")
+    worktree = _worktree(tmp_path)
+    assert _run(env, worktree, "install", name="captainhook").returncode == 0
+    assert argv.read_text().splitlines() == ["install"]
+    assert (tmp_path / "env").read_text().splitlines() == [
+        "1",
+        "core.hooksPath",
+        f"{_common_dir(tmp_path / 'repo')}/hooks",
     ]
 
 

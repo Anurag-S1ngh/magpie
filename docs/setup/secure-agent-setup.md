@@ -1428,17 +1428,21 @@ original argv + inherited stdin, so a failing local `pre-commit` /
 `pre-push` still aborts the git operation. A repo with **no** local
 hook is a clean no-op.
 
-**The hook-manager PATH shim.** prek and overcommit honour `core.hooksPath`,
+**The hook-manager PATH shim.** prek, overcommit and CaptainHook honour `core.hooksPath`,
 so a bare install under whole-user scope would write its hook into the
 *shared* dir, not the repo. The framework ships a transparent shim
 ([`tools/agent-isolation/hook-manager-shim.sh`](../../tools/agent-isolation/hook-manager-shim.sh),
 installed as `~/.claude/bin/<tool>` with `~/.claude/bin` prepended to
 PATH) that rewrites **only** the install subcommand — for prek, injecting
-`--git-dir "$(git rev-parse --git-common-dir)"`; for overcommit, setting
-`core.hooksPath` to `<absolute common dir>/hooks` — so the hook lands
-in the repo-local `.git/hooks/` where the dispatcher finds it.
+`--git-dir "$(git rev-parse --git-common-dir)"`; for overcommit and
+CaptainHook, setting `core.hooksPath` to `<absolute common dir>/hooks` — so
+the hook lands in the repo-local `.git/hooks/` where the dispatcher finds it.
 Every other command passes straight through, and the shim is
 a no-op on hosts with no global `core.hooksPath`.
+CaptainHook's `vendor/bin` command and its `captainhook/hook-installer`
+Composer plugin run outside the shim, so its install is one explicit
+`~/.claude/bin/captainhook install` with the plugin disabled in
+`composer.json`.
 When the dispatcher chains into an overcommit hook, it exports the same
 `core.hooksPath` override so overcommit's run-time self-check accepts the
 hook instead of looking for its hook in the shared dir.

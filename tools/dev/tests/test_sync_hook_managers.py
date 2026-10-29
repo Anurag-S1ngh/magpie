@@ -113,6 +113,20 @@ def test_overcommit_uses_its_flag_and_runtime_env(registry: dict[str, Any]) -> N
     assert 'hook_manager_runtime_envs="overcommit:overcommit"' in rendered[mod.DISPATCHER]
 
 
+def test_captainhook_reuses_hooks_path_env_without_a_run_time_override(
+    registry: dict[str, Any],
+) -> None:
+    adapter = registry["adapters"]["captainhook"]
+    assert "home" not in adapter
+    assert adapter["install"] == {
+        "subcommand": "install",
+        "strategy": "hooks-path-env",
+    }
+    rendered = mod.render(registry)
+    assert "captainhook) install_subcommand=install; install_strategy=hooks-path-env" in rendered[mod.SHIM]
+    assert "captainhook:CaptainHook" not in rendered[mod.DISPATCHER]
+
+
 def test_a_manager_without_a_home_is_allowed(registry: dict[str, Any]) -> None:
     del registry["adapters"]["prek"]["home"]
     assert mod.validate(registry) == []
