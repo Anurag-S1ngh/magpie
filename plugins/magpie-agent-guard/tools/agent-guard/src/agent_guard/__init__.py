@@ -2610,7 +2610,9 @@ def guarded_head(argv: list[str]) -> str | None:
     head = argv[0]
     if head in GUARDED_HEADS:
         return head
-    base = head.rsplit("/", 1)[-1]
+    base = head.replace("\\", "/").rsplit("/", 1)[-1]
+    if base.lower().endswith(".exe"):
+        base = base[:-4]
     return base if base in GUARDED_HEADS else None
 
 

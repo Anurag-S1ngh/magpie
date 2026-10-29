@@ -54,8 +54,11 @@ def _destructive_flag(argument):
 
 
 def _is_framework_path(value):
-    actual = os.path.realpath(os.path.expanduser(value))
-    return any(actual == os.path.realpath(os.path.expanduser(name)) for name in FRAMEWORK_HOOKS_PATHS)
+    actual = os.path.normcase(os.path.realpath(os.path.expanduser(value)))
+    return any(
+        actual == os.path.normcase(os.path.realpath(os.path.expanduser(name)))
+        for name in FRAMEWORK_HOOKS_PATHS
+    )
 
 
 def guard(ctx):

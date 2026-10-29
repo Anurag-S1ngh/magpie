@@ -139,9 +139,9 @@ case "$install_strategy" in
   hide-global-config)
     # Never interfere with help output.
     for _a in "$@"; do
-      if [ "$_a" = "-h" ] || [ "$_a" = "--help" ]; then
-        exec "$real_tool" "$install_subcommand" "$@"
-      fi
+      case "$_a" in
+        -h|--help) exec "$real_tool" "$install_subcommand" "$@" ;;
+      esac
     done
 
     if git rev-parse --git-common-dir >/dev/null 2>&1; then

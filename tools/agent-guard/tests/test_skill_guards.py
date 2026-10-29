@@ -638,3 +638,10 @@ def test_lefthook_destructive_install_allowed_without_a_global_path(monkeypatch)
 def test_lefthook_destructive_install_override(monkeypatch):
     monkeypatch.setattr(agent_guard, "_run", fake_run(hooks_path_stub(FRAMEWORK_HOOKS)))
     assert dispatch("MAGPIE_ALLOW_LEFTHOOK_HOOKS_PATH=1 lefthook install --force") is None
+
+
+def test_lefthook_framework_path_comparison_ignores_case(monkeypatch):
+    monkeypatch.setattr(os.path, "normcase", str.lower)
+    monkeypatch.setattr(agent_guard, "_run", fake_run(hooks_path_stub(FRAMEWORK_HOOKS.upper())))
+    reason = dispatch("lefthook install --force")
+    assert reason and "lefthook-hooks-path" in reason

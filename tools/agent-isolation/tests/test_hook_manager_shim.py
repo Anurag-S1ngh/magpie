@@ -206,15 +206,16 @@ def test_lefthook_other_invocations_pass_through(tmp_path: Path) -> None:
     ]
 
 
-def test_lefthook_help_passes_through(tmp_path: Path) -> None:
+@pytest.mark.parametrize("help_flag", ["-h", "--help"])
+def test_lefthook_help_passes_through(tmp_path: Path, help_flag: str) -> None:
     env, record, _shared = _setup_lefthook(tmp_path)
     assert (
-        _run(env, _repo(tmp_path), "install", "--help", name="lefthook").returncode == 0
+        _run(env, _repo(tmp_path), "install", help_flag, name="lefthook").returncode == 0
     )
     assert record.read_text().splitlines() == [
         "GIT_CONFIG_GLOBAL=<unset>",
         "install",
-        "--help",
+        help_flag,
     ]
 
 
