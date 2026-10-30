@@ -51,6 +51,9 @@ _REOPEN = re.compile(
 _CVSS = re.compile(r"CVSS|\bAV:[NALP]\b|\b\d{1,2}\.\d\s*\(?(?:low|medium|high|critical)\b", re.IGNORECASE)
 _DEFAULT_CVE_TOOL_URL = "https://cveprocess.apache.org"
 _DEFAULT_CVE_TOOL_HOST = urllib.parse.urlparse(_DEFAULT_CVE_TOOL_URL).hostname or ""
+# The public CVE record: a link to it is allowed once the CVE is published, so a
+# CVE tool configured as cve.org (the `independent` default) has no private URL to guard.
+PUBLIC_CVE_HOSTS = frozenset({"cve.org", "www.cve.org"})
 
 
 def cve_tool_host(cve_tool_url: object = None) -> str:
@@ -65,8 +68,10 @@ def cve_tool_host(cve_tool_url: object = None) -> str:
     return (parsed.hostname or _DEFAULT_CVE_TOOL_HOST).lower()
 
 
-def cve_tool_url_pattern(cve_tool_url: object = None) -> re.Pattern[str]:
-    """Match the configured CVE tool host and the URL that follows it."""
+def cve_tool_url_pattern(cve_tool_url: object = None) -> re.Pattern[str] | None:
+    """Match the configured CVE tool host and the URL that follows it; None for the public record."""
+    if cve_tool_host(cve_tool_url) in PUBLIC_CVE_HOSTS:
+        return None
     return re.compile(re.escape(cve_tool_host(cve_tool_url)) + r"\S*", re.IGNORECASE)
 
 
@@ -132,12 +137,13 @@ def scan(
         "tracker-reference",
         re.compile(re.escape(tracker) + r"|\b" + re.escape(owner) + r"#\d+", re.IGNORECASE),
     )
-    hit("cve-tool-url", cve_tool_url_pattern(cve_tool_url))
+    if (cve_tool := cve_tool_url_pattern(cve_tool_url)) is not None:
+        hit("cve-tool-url", cve_tool)
     hit("reopening-phrase", _REOPEN)
     hit("cvss", _CVSS)
     hit("cross-project", _CROSS_PROJECT)
     own = {str(n).lower() for n in own_names}
-    if str(organization or "").strip().upper() == "ASF":
+    if str(organization or "ASF").strip().upper() == "ASF":  # unset fails closed
         names = [n for n in ASF_PROJECTS if n.lower() not in own]
         hit("asf-project", re.compile(r"\b(?:" + "|".join(names) + r")\b"))
     for ref in refs.bare_refs(text):

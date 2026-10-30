@@ -552,3 +552,26 @@ def test_a_configured_cve_tool_url_with_a_port_matches_a_plain_url(capsys, tmp_p
          "surfaces": [{"kind": "email", "text": "See https://cve.example.org/cve5/CVE-2025-1."}]},
     )  # fmt: skip
     assert [v["guardrail"] for v in out["violations"]] == ["Linking CVEs"]
+
+
+def test_the_public_cve_record_link_is_allowed_when_cve_org_is_the_tool(capsys, tmp_path):
+    out = ok(
+        capsys,
+        tmp_path,
+        "check",
+        {"organization": "independent", "cve_tool_url": "https://www.cve.org",
+         "surfaces": [{"kind": "email", "text": "See https://www.cve.org/CVERecord?id=CVE-2025-1."}]},
+    )  # fmt: skip
+    assert out["clean"] is True
+
+
+def test_an_unset_organization_still_flags_asf_names(capsys, tmp_path):
+    out = ok(
+        capsys,
+        tmp_path,
+        "check",
+        {"surfaces": [{"kind": "status_comment", "text": "Tomcat had the same issue."}]},
+    )
+    assert [v["guardrail"] for v in out["violations"]] == [
+        "Never name or describe other ASF projects' vulnerabilities"
+    ]

@@ -65,8 +65,10 @@ _CROSS = re.compile(
 
 
 # The CVE-tool host as a URL host, not a substring check: this scans text, it sanitises nothing.
-def _cve_tool_pattern(cve_tool_url: object = None) -> re.Pattern[str]:
+def _cve_tool_pattern(cve_tool_url: object = None) -> re.Pattern[str] | None:
     host = drafting.cve_tool_host(cve_tool_url)
+    if host in drafting.PUBLIC_CVE_HOSTS:
+        return None
     return re.compile(r"(?:https?://)?(?<![\w.-])" + re.escape(host) + r"(?![\w-])", re.IGNORECASE)
 
 
@@ -87,7 +89,7 @@ def _bare_cves(sentence: str) -> list[str]:
 
 def check(data: Mapping[str, Any]) -> dict[str, Any]:
     own = {str(n).lower() for n in data.get("own_names") or []}
-    is_asf = str(data.get("organization") or "").strip().upper() == "ASF"
+    is_asf = str(data.get("organization") or "ASF").strip().upper() == "ASF"  # unset fails closed
     names = [n for n in drafting.ASF_PROJECTS if n.lower() not in own] if is_asf else []
     other = re.compile(r"\b(?:Apache\s+)?(?:" + "|".join(names) + r")\b") if names else None
     cve_tool = _cve_tool_pattern(data.get("cve_tool_url"))
@@ -103,7 +105,7 @@ def check(data: Mapping[str, Any]) -> dict[str, Any]:
             if (other is not None and other.search(sentence)) or _CROSS.search(sentence):
                 found.append(OTHER_ASF)
             if kind == "email":
-                if cve_tool.search(sentence):
+                if cve_tool is not None and cve_tool.search(sentence):
                     found.append(LINK_CVE)
             elif kind in MARKDOWN:
                 if _bare_cves(sentence):
