@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import re
+import urllib.parse
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -49,6 +50,13 @@ _REOPEN = re.compile(
 )
 _CVSS = re.compile(r"CVSS|\bAV:[NALP]\b|\b\d{1,2}\.\d\s*\(?(?:low|medium|high|critical)\b", re.IGNORECASE)
 _CVE_TOOL_URL = re.compile(r"cveprocess\.apache\.org\S*")
+_DEFAULT_CVE_TOOL_URL = "https://cveprocess.apache.org"
+
+
+def cve_tool_url_pattern(cve_tool_url: object = None) -> re.Pattern[str]:
+    """Match the configured CVE tool host and the URL that follows it."""
+    host = urllib.parse.urlparse(str(cve_tool_url or _DEFAULT_CVE_TOOL_URL)).netloc
+    return re.compile(re.escape(host) + r"\S*", re.IGNORECASE) if host else _CVE_TOOL_URL
 
 
 def backend(data: Mapping[str, Any]) -> tuple[str, str | None]:
@@ -98,6 +106,7 @@ def scan(
     tracker: str,
     own_names: Iterable[object] = (),
     organization: object = None,
+    cve_tool_url: object = None,
 ) -> list[dict[str, Any]]:
     """Every leak in `text`: `{kind, line, text}`, `line` 1-based or `None`."""
     owner = tracker.split("/")[0]
@@ -112,7 +121,7 @@ def scan(
         "tracker-reference",
         re.compile(re.escape(tracker) + r"|\b" + re.escape(owner) + r"#\d+", re.IGNORECASE),
     )
-    hit("cve-tool-url", _CVE_TOOL_URL)
+    hit("cve-tool-url", cve_tool_url_pattern(cve_tool_url))
     hit("reopening-phrase", _REOPEN)
     hit("cvss", _CVSS)
     hit("cross-project", _CROSS_PROJECT)

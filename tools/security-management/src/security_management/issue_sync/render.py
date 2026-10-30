@@ -41,6 +41,7 @@ repeats the next step.
 from __future__ import annotations
 
 import re
+import urllib.parse
 from collections.abc import Mapping
 from typing import Any
 
@@ -64,6 +65,17 @@ _CROSS = re.compile(
 )
 # The CVE-tool host as a URL host, not a substring check: this scans text, it sanitises nothing.
 _CVE_TOOL_URL = re.compile(r"(?:https?://)?(?<![\w.-])cveprocess\.apache\.org(?![\w-])", re.IGNORECASE)
+
+
+def _cve_tool_pattern(cve_tool_url: object = None) -> re.Pattern[str]:
+    host = urllib.parse.urlparse(str(cve_tool_url or "https://cveprocess.apache.org")).netloc
+    return (
+        re.compile(r"(?:https?://)?(?<![\w.-])" + re.escape(host) + r"(?![\w-])", re.IGNORECASE)
+        if host
+        else _CVE_TOOL_URL
+    )
+
+
 _BREAK = re.compile(r"(?<=[.!?])\s+")
 
 
@@ -84,6 +96,7 @@ def check(data: Mapping[str, Any]) -> dict[str, Any]:
     is_asf = str(data.get("organization") or "").strip().upper() == "ASF"
     names = [n for n in drafting.ASF_PROJECTS if n.lower() not in own] if is_asf else []
     other = re.compile(r"\b(?:Apache\s+)?(?:" + "|".join(names) + r")\b") if names else None
+    cve_tool = _cve_tool_pattern(data.get("cve_tool_url"))
     violations: list[dict[str, str]] = []
     for surface in data.get("surfaces") or []:
         kind = str(surface.get("kind") or "")
@@ -96,7 +109,7 @@ def check(data: Mapping[str, Any]) -> dict[str, Any]:
             if (other is not None and other.search(sentence)) or _CROSS.search(sentence):
                 found.append(OTHER_ASF)
             if kind == "email":
-                if _CVE_TOOL_URL.search(sentence):
+                if cve_tool.search(sentence):
                     found.append(LINK_CVE)
             elif kind in MARKDOWN:
                 if _bare_cves(sentence):
