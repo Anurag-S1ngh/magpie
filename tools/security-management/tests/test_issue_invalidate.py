@@ -378,7 +378,10 @@ def test_check_draft_flags_leaks(capsys, tmp_path):
         "Your CVSS 7.5 is noted; Tomcat had the same. Happy to discuss further. Also #12.\n"
     )
     _, out = run(
-        capsys, tmp_path, "check-draft", {"body": reply, "tracker": TRACKER, "disposition": "duplicate"}
+        capsys,
+        tmp_path,
+        "check-draft",
+        {"body": reply, "tracker": TRACKER, "disposition": "duplicate", "organization": "ASF"},
     )
     kinds = {h["kind"] for h in out["hits"]}
     assert kinds == {
@@ -390,6 +393,17 @@ def test_check_draft_flags_leaks(capsys, tmp_path):
         "bare-ref",
         "missing-canonical-cve",
     }
+
+
+def test_check_draft_skips_asf_project_names_for_a_non_asf_project(capsys, tmp_path):
+    reply = "Tomcat had the same issue.\n"
+    _, out = run(
+        capsys,
+        tmp_path,
+        "check-draft",
+        {"body": reply, "tracker": TRACKER, "disposition": "duplicate", "organization": "independent"},
+    )
+    assert "asf-project" not in {h["kind"] for h in out["hits"]}
 
 
 # --- step-5e-rollup-entry -------------------------------------------------------

@@ -495,7 +495,7 @@ def test_case_2_severity_label_not_copied(capsys, tmp_path):
 def test_case_3_other_asf_project_not_named(capsys, tmp_path):
     out = ok(
         capsys, tmp_path, "check",
-        {"surfaces": [
+        {"organization": "ASF", "surfaces": [
             {"kind": "status_comment", "text": "Sync 2025-11-04 — SSRF confirmed. Note: reporter has previously reported "
              "CVE-2024-55633 against Apache Superset exploiting an identical connection test vector. "
              "Our issue shares the same root cause."},
@@ -509,6 +509,17 @@ def test_case_3_other_asf_project_not_named(capsys, tmp_path):
         "Never name or describe other ASF projects' vulnerabilities",
         "Linking CVEs",
     ]
+
+
+def test_a_non_asf_project_does_not_flag_asf_names(capsys, tmp_path):
+    out = ok(
+        capsys, tmp_path, "check",
+        {"organization": "independent", "surfaces": [
+            {"kind": "status_comment", "text": "Sync 2025-11-04 — SSRF confirmed. Note: reporter has previously "
+             "reported a similar issue against Apache Superset."},
+        ]},
+    )  # fmt: skip
+    assert out["clean"] is True
 
 
 def test_the_cve_tool_url_in_an_email_is_the_violation(capsys, tmp_path):

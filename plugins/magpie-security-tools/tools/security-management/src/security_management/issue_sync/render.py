@@ -81,8 +81,9 @@ def _bare_cves(sentence: str) -> list[str]:
 
 def check(data: Mapping[str, Any]) -> dict[str, Any]:
     own = {str(n).lower() for n in data.get("own_names") or []}
-    names = [n for n in drafting.ASF_PROJECTS if n.lower() not in own]
-    other = re.compile(r"\b(?:Apache\s+)?(?:" + "|".join(names) + r")\b")
+    is_asf = str(data.get("organization") or "").strip().upper() == "ASF"
+    names = [n for n in drafting.ASF_PROJECTS if n.lower() not in own] if is_asf else []
+    other = re.compile(r"\b(?:Apache\s+)?(?:" + "|".join(names) + r")\b") if names else None
     violations: list[dict[str, str]] = []
     for surface in data.get("surfaces") or []:
         kind = str(surface.get("kind") or "")
@@ -92,7 +93,7 @@ def check(data: Mapping[str, Any]) -> dict[str, Any]:
             found: list[str] = []
             if _CVSS.search(sentence):
                 found.append(CVSS)
-            if other.search(sentence) or _CROSS.search(sentence):
+            if (other is not None and other.search(sentence)) or _CROSS.search(sentence):
                 found.append(OTHER_ASF)
             if kind == "email":
                 if _CVE_TOOL_URL.search(sentence):

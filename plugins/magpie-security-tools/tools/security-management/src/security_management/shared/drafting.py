@@ -93,7 +93,12 @@ def anchor(name: str, data: Mapping[str, Any]) -> dict[str, Any]:
     }[name]
 
 
-def scan(text: str, tracker: str, own_names: Iterable[object] = ()) -> list[dict[str, Any]]:
+def scan(
+    text: str,
+    tracker: str,
+    own_names: Iterable[object] = (),
+    organization: object = None,
+) -> list[dict[str, Any]]:
     """Every leak in `text`: `{kind, line, text}`, `line` 1-based or `None`."""
     owner = tracker.split("/")[0]
     hits: list[dict[str, Any]] = []
@@ -112,8 +117,9 @@ def scan(text: str, tracker: str, own_names: Iterable[object] = ()) -> list[dict
     hit("cvss", _CVSS)
     hit("cross-project", _CROSS_PROJECT)
     own = {str(n).lower() for n in own_names}
-    names = [n for n in ASF_PROJECTS if n.lower() not in own]
-    hit("asf-project", re.compile(r"\b(?:" + "|".join(names) + r")\b"))
+    if str(organization or "").strip().upper() == "ASF":
+        names = [n for n in ASF_PROJECTS if n.lower() not in own]
+        hit("asf-project", re.compile(r"\b(?:" + "|".join(names) + r")\b"))
     for ref in refs.bare_refs(text):
         hits.append({"kind": "bare-ref", "line": None, "text": ref})
     return hits
