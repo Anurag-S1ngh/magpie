@@ -41,14 +41,20 @@ def _install_arguments(argv):
 
 
 def _destructive_flag(argument):
-    if argument in ("-f", "--force"):
+    # lefthook takes the `--flag=value` spelling for its boolean flags, so match
+    # the name and read the value separately: `--force=true` is destructive,
+    # `--force=false` is not.
+    name, _, value = argument.partition("=")
+    if value.lower() in ("false", "0", "f", "no", "off"):
+        return None
+    if name in ("-f", "--force"):
         return "--force"
-    if argument in ("-r", "--reset-hooks-path"):
+    if name in ("-r", "--reset-hooks-path"):
         return "--reset-hooks-path"
-    if argument.startswith("-") and not argument.startswith("--"):
-        if "f" in argument[1:]:
+    if name.startswith("-") and not name.startswith("--"):
+        if "f" in name[1:]:
             return "--force"
-        if "r" in argument[1:]:
+        if "r" in name[1:]:
             return "--reset-hooks-path"
     return None
 

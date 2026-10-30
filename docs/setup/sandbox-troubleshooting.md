@@ -1245,8 +1245,7 @@ resolved path. Confirm with `git hook run pre-commit` from the agent.
 
 ### Symptom
 
-A repository that uses lefthook has no working hooks, and `lefthook install`
-fails:
+A repository that uses lefthook has no working hooks, and `lefthook install` fails:
 
 ```console
 $ lefthook install
@@ -1257,40 +1256,27 @@ Custom hooks paths are not supported by default.
 
 ### Root cause
 
-Whole-user scope sets a global `core.hooksPath`, and lefthook refuses to install
-while a scoped `git config --global` read returns one.
-That is the safe failure: the alternative, `--force`, writes lefthook's hook
-into the shared directory and replaces the framework's dispatcher for every
-repository on the host.
+Whole-user scope sets a global `core.hooksPath`, and lefthook refuses to install while a scoped `git config --global` read returns one.
+That is the safe failure: the alternative, `--force`, writes lefthook's hook into the shared directory and replaces the framework's dispatcher for every repository on the host.
 
 ### Fix
 
-Run `lefthook install` through the framework shim, which hides the global config
-from that read and leaves the hook in the repository's own
-`$(git rev-parse --git-common-dir)/hooks/`:
+Run `lefthook install` through the framework shim, which hides the global config from that read and leaves the hook in the repository's own `$(git rev-parse --git-common-dir)/hooks/`:
 
 ```bash
 ~/.claude/bin/lefthook install
 ```
 
-With `~/.claude/bin` ahead of the real binary on PATH, plain `lefthook install`
-does that already.
-The setup installs the shim only for a repository that uses lefthook: a root
-`lefthook.*`, `.lefthook.*` or `-local` config, or an installed hook mentioning
-`call_lefthook`.
+With `~/.claude/bin` ahead of the real binary on PATH, plain `lefthook install` does that already.
+The setup installs the shim only for a repository that uses lefthook: a root `lefthook.*`, `.lefthook.*` or `-local` config, or an installed hook mentioning `call_lefthook`.
 
 ### Notes
 
-- Do not run `lefthook install --reset-hooks-path` or `--force` to get past the
-  error: the first unsets the whole-user setup, and the second overwrites the
-  dispatcher for every repository.
-  The agent-guard `lefthook-hooks-path` guard blocks both, and needs
-  `MAGPIE_ALLOW_LEFTHOOK_HOOKS_PATH=1` to proceed deliberately.
-- An npm `postinstall` runs `node_modules/.bin/lefthook`, which the shim does
-  not cover; that install refuses for the same reason, and the repository needs
-  one run through the shim.
-- Per-project scope has no global `core.hooksPath`, so the refusal does not
-  happen there.
+- Do not run `lefthook install --reset-hooks-path` or `--force` to get past the error: the first unsets the whole-user setup, and the second overwrites the dispatcher for every repository.
+  The agent-guard `lefthook-hooks-path` guard blocks both, in the `--flag` and `--flag=true` spellings, and needs `MAGPIE_ALLOW_LEFTHOOK_HOOKS_PATH=1` to proceed deliberately.
+- An npm `postinstall` runs `node_modules/.bin/lefthook`, which the shim does not cover; that install refuses for the same reason, and the repository needs one run through the shim.
+- The shim hides the global config only while it holds a `core.hooksPath`, so on a host without one the install keeps the operator's `credential.helper`, `url.*.insteadOf` and `safe.directory`.
+- Per-project scope has no global `core.hooksPath`, so the refusal does not happen there.
 
 ---
 

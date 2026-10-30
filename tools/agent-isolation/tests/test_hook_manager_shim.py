@@ -79,8 +79,15 @@ def _setup_lefthook(tmp_path: Path) -> tuple[dict[str, str], Path, Path]:
     env = dict(os.environ)
     for name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"):
         env.pop(name, None)
-    env.update(PATH=f"{shims}:{real}:/usr/bin:/bin", HOME=str(home))
+    env.update(PATH=f"{shims}:{real}:/usr/bin:/bin", HOME=str(home), GIT_CONFIG_NOSYSTEM="1")
     return env, record, shared
+
+
+def _set_global_hooks_path(env: dict[str, str], value: str | None) -> None:
+    """Rewrite the fake home's global config: a `core.hooksPath`, or none."""
+    (Path(env["HOME"]) / ".gitconfig").write_text(
+        f"[core]\n\thooksPath = {value}\n" if value else "[user]\n\tname = t\n"
+    )
 
 
 def _run(
@@ -146,6 +153,28 @@ def test_lefthook_install_hides_the_global_hooks_path(tmp_path: Path) -> None:
     assert record.read_text().splitlines() == ["GIT_CONFIG_GLOBAL=/dev/null", "install"]
     assert (repo / ".git" / "hooks" / "pre-commit").is_file()
     assert not (shared / "pre-commit").exists()
+
+
+def test_lefthook_install_hides_a_custom_global_hooks_path(tmp_path: Path) -> None:
+    env, record, _shared = _setup_lefthook(tmp_path)
+    other = tmp_path / "other-hooks"
+    _set_global_hooks_path(env, str(other))
+    repo = _repo(tmp_path)
+    assert _run(env, repo, "install", name="lefthook").returncode == 0
+    assert record.read_text().splitlines() == ["GIT_CONFIG_GLOBAL=/dev/null", "install"]
+    assert (repo / ".git" / "hooks" / "pre-commit").is_file()
+    assert not (other / "pre-commit").exists()
+
+
+def test_lefthook_install_without_a_global_hooks_path_keeps_the_global_config(
+    tmp_path: Path,
+) -> None:
+    env, record, _shared = _setup_lefthook(tmp_path)
+    _set_global_hooks_path(env, None)
+    repo = _repo(tmp_path)
+    assert _run(env, repo, "install", name="lefthook").returncode == 0
+    assert record.read_text().splitlines() == ["GIT_CONFIG_GLOBAL=<unset>", "install"]
+    assert (repo / ".git" / "hooks" / "pre-commit").is_file()
 
 
 def test_lefthook_install_in_a_linked_worktree_targets_the_main_checkout(

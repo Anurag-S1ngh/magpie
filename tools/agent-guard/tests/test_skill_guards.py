@@ -598,7 +598,10 @@ def hooks_path_stub(value):
     [
         ("lefthook install --force", "--force"),
         ("lefthook install -f", "--force"),
+        ("lefthook install --force=true", "--force"),
+        ("lefthook install --force=1", "--force"),
         ("lefthook install --reset-hooks-path", "--reset-hooks-path"),
+        ("lefthook install --reset-hooks-path=true", "--reset-hooks-path"),
         ("lefthook install -r", "--reset-hooks-path"),
         ("lefthook install -fr", "--force"),
         ("lefthook --verbose install --force", "--force"),
@@ -621,6 +624,18 @@ def test_lefthook_destructive_install_denied(monkeypatch, hooks_path, command, f
     ],
 )
 def test_lefthook_plain_invocations_allowed(monkeypatch, command):
+    monkeypatch.setattr(agent_guard, "_run", fake_run(hooks_path_stub(FRAMEWORK_HOOKS)))
+    assert dispatch(command) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "lefthook install --force=false",
+        "lefthook install --reset-hooks-path=false",
+    ],
+)
+def test_lefthook_switched_off_destructive_flag_allowed(monkeypatch, command):
     monkeypatch.setattr(agent_guard, "_run", fake_run(hooks_path_stub(FRAMEWORK_HOOKS)))
     assert dispatch(command) is None
 

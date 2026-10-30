@@ -52,10 +52,12 @@
 #       hide-global-config: run the install with
 #         GIT_CONFIG_GLOBAL=/dev/null, for a manager that writes to
 #         the common dir itself but refuses while a global
-#         core.hooksPath is set (lefthook). The override applies even
-#         with `--force` / `--reset-hooks-path`: through this shim
-#         those must not write into the shared dir or unset the
-#         whole-user setup. Run the real binary to bypass it.
+#         core.hooksPath is set (lefthook). The override applies only
+#         when the global config actually holds a core.hooksPath, so an
+#         ordinary host keeps its credential and url.* settings, and
+#         even then it applies with `--force` / `--reset-hooks-path`:
+#         through this shim those must not write into the shared dir or
+#         unset the whole-user setup. Run the real binary to bypass it.
 #   * every other invocation (`prek run`, `prek autoupdate`,
 #     `--version`, bare `prek`, ...) is passed through to the real
 #     binary **unchanged**.
@@ -145,7 +147,13 @@ case "$install_strategy" in
     done
 
     if git rev-parse --git-common-dir >/dev/null 2>&1; then
-      GIT_CONFIG_GLOBAL=/dev/null exec "$real_tool" "$install_subcommand" "$@"
+      # Hide the global config only when it holds a core.hooksPath to hide: the
+      # override also costs the install the operator's credential.helper,
+      # url.*.insteadOf and safe.directory, and the manager can clone remote
+      # configs while installing.
+      if [ -n "$(git config --global --get core.hooksPath 2>/dev/null)" ]; then
+        GIT_CONFIG_GLOBAL=/dev/null exec "$real_tool" "$install_subcommand" "$@"
+      fi
     fi
     # not in a git work tree: let the real tool produce its own error
     ;;

@@ -347,9 +347,9 @@ for the full rationale + the validated behaviour matrix.
    The shim takes the tool from the name it is installed under and rewrites only
    the install subcommand: for prek it injects
    `--git-dir "$(git rev-parse --git-common-dir)"`; for lefthook it runs the
-   install with `GIT_CONFIG_GLOBAL=/dev/null`, which hides the global
-   `core.hooksPath` from lefthook's own check and lets its target resolve to the
-   common dir.
+   install with `GIT_CONFIG_GLOBAL=/dev/null` while the global config holds one,
+   which hides the global `core.hooksPath` from lefthook's own check and lets
+   its target resolve to the common dir.
    Both leave the install alone when the caller asked for `--help` or is outside
    a git work tree (prek also when `--git-dir` is already passed), and every
    other invocation passes through unchanged.
