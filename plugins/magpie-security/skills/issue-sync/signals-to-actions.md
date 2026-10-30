@@ -326,6 +326,7 @@ Group them by category:
      - **Any other archive (`archive_system.kind` not `ponymail`).** Query the project's `search_url_template` with the CVE ID, open the hit's thread, and take its id. When the archive declares no `search_url_template`, or no hit resolves, ask the release manager for the archived advisory URL instead of guessing.
 
      A single hit is the advisory thread. Build the public advisory URL with the manifest's `advisory_thread_url_template` (or the legacy `ponymail_thread_url_template` when the project declares only that key).
+     When neither key is declared, use the thread permalink the archive returned, or ask the release manager; never construct one.
 
      **A search hit is a candidate, not the advisory.** The search matches any public post that mentions the CVE ID
      (a user question, a reply, a forward), and capturing this URL is what moves the CVE record to `PUBLIC`.
@@ -340,7 +341,7 @@ Group them by category:
      and say that the sender comes from the archived `From:` header and is not cryptographically verified,
      so the user should recognise the announcement itself before confirming;
      record it — and run the close-out that follows from it — only once the user explicitly confirms that URL.
-     On that confirmation, populate the field with the thread URL (per `advisory_thread_url_template`),
+     On that confirmation, populate the field with the thread URL (per `advisory_thread_url_template`, or the legacy `ponymail_thread_url_template`),
      regenerate the CVE JSON attachment, and add the `announced` label.
   2. If the field is already populated, treat it as authoritative — no scan.
      Regenerate the CVE JSON attachment so the URL flows into `references[]` as `vendor-advisory`.

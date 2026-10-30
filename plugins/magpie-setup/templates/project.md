@@ -304,8 +304,8 @@ remove the row.
 | `ponymail_private_search_url_template` | `ponymail` | TODO |
 | `ponymail_public_search_url_template` | `ponymail` | TODO |
 | `ponymail_api_url_template` | `ponymail` | TODO |
-| `ponymail_thread_url_template` | `ponymail` | `https://lists.apache.org/thread/{thread_id}?{list}` |
-| `advisory_thread_url_template` | `archive_system` (org) | `https://lists.apache.org/thread/{thread_id}?{list}` |
+| `ponymail_thread_url_template` | `ponymail` | `https://lists.apache.org/thread/{thread_id}?{list}@{list_domain}` |
+| `advisory_thread_url_template` | `archive_system` (org) | `https://lists.apache.org/thread/{thread_id}?{list}@{list_domain}` |
 | `imap_host` | `imap` | TODO: e.g. `imap.example.org` |
 | `imap_account` | `imap` | TODO: e.g. `security-triage@example.org` |
 | `imap_security_list_folder` | `imap` | TODO: e.g. `INBOX.security-list` |
