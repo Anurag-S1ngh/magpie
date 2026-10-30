@@ -49,14 +49,25 @@ _REOPEN = re.compile(
     r"happy to discuss further|open to other views|let us know if you disagree", re.IGNORECASE
 )
 _CVSS = re.compile(r"CVSS|\bAV:[NALP]\b|\b\d{1,2}\.\d\s*\(?(?:low|medium|high|critical)\b", re.IGNORECASE)
-_CVE_TOOL_URL = re.compile(r"cveprocess\.apache\.org\S*")
 _DEFAULT_CVE_TOOL_URL = "https://cveprocess.apache.org"
+_DEFAULT_CVE_TOOL_HOST = urllib.parse.urlparse(_DEFAULT_CVE_TOOL_URL).hostname or ""
+
+
+def cve_tool_host(cve_tool_url: object = None) -> str:
+    """The configured CVE tool's host; `https://` is assumed when the scheme is omitted.
+
+    A bare host (`cve.example.org`) leaves `urlparse`'s `netloc` empty, so the
+    scheme is filled in first; `hostname` drops any userinfo and port, which a
+    URL in the scanned text will not carry.
+    """
+    raw = str(cve_tool_url or _DEFAULT_CVE_TOOL_URL).strip()
+    parsed = urllib.parse.urlparse(raw if "://" in raw else f"https://{raw}")
+    return (parsed.hostname or _DEFAULT_CVE_TOOL_HOST).lower()
 
 
 def cve_tool_url_pattern(cve_tool_url: object = None) -> re.Pattern[str]:
     """Match the configured CVE tool host and the URL that follows it."""
-    host = urllib.parse.urlparse(str(cve_tool_url or _DEFAULT_CVE_TOOL_URL)).netloc
-    return re.compile(re.escape(host) + r"\S*", re.IGNORECASE) if host else _CVE_TOOL_URL
+    return re.compile(re.escape(cve_tool_host(cve_tool_url)) + r"\S*", re.IGNORECASE)
 
 
 def backend(data: Mapping[str, Any]) -> tuple[str, str | None]:

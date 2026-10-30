@@ -41,7 +41,6 @@ repeats the next step.
 from __future__ import annotations
 
 import re
-import urllib.parse
 from collections.abc import Mapping
 from typing import Any
 
@@ -63,17 +62,12 @@ _CROSS = re.compile(
     r"also reported against|cross-project|other apache projects|sister project|the same finder also",
     re.IGNORECASE,
 )
+
+
 # The CVE-tool host as a URL host, not a substring check: this scans text, it sanitises nothing.
-_CVE_TOOL_URL = re.compile(r"(?:https?://)?(?<![\w.-])cveprocess\.apache\.org(?![\w-])", re.IGNORECASE)
-
-
 def _cve_tool_pattern(cve_tool_url: object = None) -> re.Pattern[str]:
-    host = urllib.parse.urlparse(str(cve_tool_url or "https://cveprocess.apache.org")).netloc
-    return (
-        re.compile(r"(?:https?://)?(?<![\w.-])" + re.escape(host) + r"(?![\w-])", re.IGNORECASE)
-        if host
-        else _CVE_TOOL_URL
-    )
+    host = drafting.cve_tool_host(cve_tool_url)
+    return re.compile(r"(?:https?://)?(?<![\w.-])" + re.escape(host) + r"(?![\w-])", re.IGNORECASE)
 
 
 _BREAK = re.compile(r"(?<=[.!?])\s+")

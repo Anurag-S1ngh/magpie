@@ -530,3 +530,25 @@ def test_the_cve_tool_url_in_an_email_is_the_violation(capsys, tmp_path):
         {"surfaces": [{"kind": "email", "text": "See https://cveprocess.apache.org/cve5/CVE-2025-1."}]},
     )
     assert [v["guardrail"] for v in out["violations"]] == ["Linking CVEs"]
+
+
+def test_a_configured_cve_tool_url_without_a_scheme_is_still_the_violation(capsys, tmp_path):
+    out = ok(
+        capsys,
+        tmp_path,
+        "check",
+        {"cve_tool_url": "cve.example.org",
+         "surfaces": [{"kind": "email", "text": "See https://cve.example.org/cve5/CVE-2025-1."}]},
+    )  # fmt: skip
+    assert [v["guardrail"] for v in out["violations"]] == ["Linking CVEs"]
+
+
+def test_a_configured_cve_tool_url_with_a_port_matches_a_plain_url(capsys, tmp_path):
+    out = ok(
+        capsys,
+        tmp_path,
+        "check",
+        {"cve_tool_url": "https://cve.example.org:8443",
+         "surfaces": [{"kind": "email", "text": "See https://cve.example.org/cve5/CVE-2025-1."}]},
+    )  # fmt: skip
+    assert [v["guardrail"] for v in out["violations"]] == ["Linking CVEs"]
