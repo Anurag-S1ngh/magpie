@@ -431,6 +431,12 @@ reads mail from a different backend than its organization.
 Org-level — inherited from your organization's `archive_system` block
 (public-archive backend + URL templates). Override here only if this
 project's advisories surface on a different archive than its organization.
+The block carries `search_url_template` (query a list for a CVE ID),
+`api_query_url_template`, `advisory_thread_url_template` (build the public
+advisory URL from a thread id), `advisory_publication_signal_url` and
+`mail_archive_url`. The issue-sync advisory step reads
+`advisory_thread_url_template`; a project that still declares only the
+legacy `ponymail_thread_url_template` keeps working through that key.
 
 ### Project metadata
 
