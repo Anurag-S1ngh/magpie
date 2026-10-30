@@ -45,16 +45,18 @@ def _destructive_flag(argument):
     # the name and read the value separately: `--force=true` is destructive,
     # `--force=false` is not.
     name, _, value = argument.partition("=")
-    if value.lower() in ("false", "0", "f", "no", "off"):
-        return None
+    off = value.lower() in ("false", "0", "f", "no", "off")
     if name in ("-f", "--force"):
-        return "--force"
+        return None if off else "--force"
     if name in ("-r", "--reset-hooks-path"):
-        return "--reset-hooks-path"
+        return None if off else "--reset-hooks-path"
     if name.startswith("-") and not name.startswith("--"):
-        if "f" in name[1:]:
+        # In a bundle (`-fr=false`) the value belongs to the last switch only;
+        # every switch before it is set.
+        letters = name[1:-1] if off else name[1:]
+        if "f" in letters:
             return "--force"
-        if "r" in name[1:]:
+        if "r" in letters:
             return "--reset-hooks-path"
     return None
 

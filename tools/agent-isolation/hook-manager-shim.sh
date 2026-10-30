@@ -115,7 +115,9 @@ fi
 
 shift  # drop the install subcommand
 
-# --- install strategies: generated branches keyed by install_strategy ------
+# --- install strategies: one hand-written branch per install_strategy ------
+# (tools/dev/sync-hook-managers.py lists them in STRATEGIES and generates only
+# the adapter() block above.)
 case "$install_strategy" in
   git-dir-flag)
     # Respect a target the caller chose, and never interfere with help output.

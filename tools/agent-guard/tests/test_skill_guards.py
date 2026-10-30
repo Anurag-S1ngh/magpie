@@ -604,6 +604,8 @@ def hooks_path_stub(value):
         ("lefthook install --reset-hooks-path=true", "--reset-hooks-path"),
         ("lefthook install -r", "--reset-hooks-path"),
         ("lefthook install -fr", "--force"),
+        ("lefthook install -fr=false", "--force"),
+        ("lefthook install -rf=false", "--reset-hooks-path"),
         ("lefthook --verbose install --force", "--force"),
         ("./node_modules/.bin/lefthook install --force", "--force"),
     ],
@@ -633,6 +635,7 @@ def test_lefthook_plain_invocations_allowed(monkeypatch, command):
     [
         "lefthook install --force=false",
         "lefthook install --reset-hooks-path=false",
+        "lefthook install -f=false",
     ],
 )
 def test_lefthook_switched_off_destructive_flag_allowed(monkeypatch, command):
