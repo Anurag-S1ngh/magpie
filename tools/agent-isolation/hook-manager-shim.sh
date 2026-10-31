@@ -17,7 +17,7 @@
 # under the License.
 #
 # hook-manager-shim.sh — a transparent front for a git-hook manager
-# (prek and lefthook today; see tools/hook-manager/registry.json),
+# (prek, overcommit and lefthook today; see tools/hook-manager/registry.json),
 # installed as `~/.claude/bin/<tool>` with `~/.claude/bin` prepended
 # to PATH so it shadows the real binary. The tool is the name it is
 # installed under (`basename "$0"`), so one script serves every
@@ -42,13 +42,18 @@
 #
 # WHAT THIS SHIM DOES
 # -------------------
-#   * `<tool> <install subcommand> [...]` -> rewritten per the
+#   * `<tool> <install action> [...]` -> rewritten per the
 #     adapter's install strategy so the hook lands in
 #     "$(git rev-parse --git-common-dir)/hooks" (absolute, worktree-
 #     safe: `--git-common-dir` resolves linked worktrees to the main
 #     checkout's hooks dir) — UNLESS the caller already chose a
 #     target, asked for help, or we are not inside a git work tree.
+#     A flag-style action and its registry aliases are found anywhere
+#     in argv (`overcommit --force --install`, `overcommit -i`); a
+#     positional action is only argv[0] (`prek install`).
 #       git-dir-flag: inject `<flag> <common dir>` (prek: --git-dir)
+#       hooks-path-env: append GIT_CONFIG_* so the manager writes to
+#       `<common dir>/hooks` (overcommit: --install, -i)
 #       hide-global-config: run the install with
 #         GIT_CONFIG_GLOBAL=/dev/null, for a manager that writes to
 #         the common dir itself but refuses while a global
@@ -76,6 +81,7 @@ tool="$(basename "$0")"
 adapter() {
   case "$1" in
     lefthook) install_subcommand=install; install_strategy=hide-global-config ;;
+    overcommit) install_subcommand=--install; install_strategy=hooks-path-env; install_aliases='--install -i' ;;
     prek) install_subcommand=install; install_strategy=git-dir-flag; install_flag=--git-dir ;;
     *) return 1 ;;
   esac
@@ -108,18 +114,63 @@ if [ -z "$real_tool" ]; then
   exit 127
 fi
 
-# --- only rewrite the install subcommand; everything else is transparent ---
-if [ "${1:-}" != "$install_subcommand" ]; then
+# --- only rewrite the install action; everything else is transparent -------
+# A positional subcommand (`prek install`) is only the first argument. A
+# flag-style action (`overcommit --install`) may follow other options, so scan
+# the whole argv for it and its aliases (`overcommit -i`). Option parsers such
+# as Ruby's OptionParser also take a single-letter alias inside a bundle of
+# short switches (`-fi`) and an unambiguous prefix of a long one (`--inst`),
+# so those count too; rewriting a non-install run only points core.hooksPath
+# at the repository's own hooks, which is harmless.
+install_invoked=0
+case "$install_subcommand" in
+  -*)
+    install_actions="${install_aliases:-$install_subcommand}"
+    for _a in "$@"; do
+      for _action in $install_actions; do
+        case "$_action" in
+          --*)
+            # Any prefix (`--i` on): fail closed, since a wrongly rewritten run is harmless.
+            if [ "${#_a}" -ge 3 ] && [ "${_action#"$_a"}" != "$_action" ]; then
+              install_invoked=1
+              break 2
+            fi
+            ;;
+          -?)
+            case "$_a" in
+              --*) ;;
+              -*"${_action#-}"*)
+                install_invoked=1
+                break 2
+                ;;
+            esac
+            ;;
+          *)
+            if [ "$_a" = "$_action" ]; then
+              install_invoked=1
+              break 2
+            fi
+            ;;
+        esac
+      done
+    done
+    ;;
+  *)
+    [ "${1:-}" = "$install_subcommand" ] && install_invoked=1
+    ;;
+esac
+
+if [ "$install_invoked" = 0 ]; then
   exec "$real_tool" "$@"
 fi
-
-shift  # drop the install subcommand
 
 # --- install strategies: one hand-written branch per install_strategy ------
 # (tools/dev/sync-hook-managers.py lists them in STRATEGIES and generates only
 # the adapter() block above.)
 case "$install_strategy" in
   git-dir-flag)
+    # Only positional actions use this strategy; the action is argv[0].
+    shift  # drop the install subcommand
     # Respect a target the caller chose, and never interfere with help output.
     inject=1
     for _a in "$@"; do
@@ -139,8 +190,38 @@ case "$install_strategy" in
       fi
       # not in a git work tree: let the real tool produce its own error
     fi
+    exec "$real_tool" "$install_subcommand" "$@"
+    ;;
+  hooks-path-env)
+    # Never interfere with help output.
+    inject=1
+    for _a in "$@"; do
+      case "$_a" in
+        -h|--help) inject=0; break ;;
+      esac
+    done
+
+    if [ "$inject" = 1 ]; then
+      if gitdir="$(git rev-parse --git-common-dir 2>/dev/null)"; then
+        case "$gitdir" in
+          /*) : ;;                                   # already absolute
+          *)  gitdir="$(cd "$gitdir" 2>/dev/null && pwd -P || echo "$gitdir")" ;;
+        esac
+        # Append at the next index so a caller's GIT_CONFIG_* entries survive.
+        _i="${GIT_CONFIG_COUNT:-0}"
+        case "$_i" in
+          ''|*[!0-9]*) _i=0 ;;
+        esac
+        export "GIT_CONFIG_KEY_$_i=core.hooksPath"
+        export "GIT_CONFIG_VALUE_$_i=${gitdir%/}/hooks"
+        export GIT_CONFIG_COUNT=$((_i + 1))
+        exec "$real_tool" "$@"
+      fi
+      # not in a git work tree: let the real tool produce its own error
+    fi
     ;;
   hide-global-config)
+    shift  # drop the install subcommand
     # Never interfere with help output.
     for _a in "$@"; do
       case "$_a" in
@@ -158,7 +239,8 @@ case "$install_strategy" in
       fi
     fi
     # not in a git work tree: let the real tool produce its own error
+    exec "$real_tool" "$install_subcommand" "$@"
     ;;
 esac
 
-exec "$real_tool" "$install_subcommand" "$@"
+exec "$real_tool" "$@"

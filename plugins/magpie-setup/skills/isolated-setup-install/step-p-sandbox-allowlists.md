@@ -334,25 +334,28 @@ for the full rationale + the validated behaviour matrix.
    `~/.claude-config/bin/<tool>`), mode `0755`, once for each adapter in the
    [hook-manager registry](../../../../tools/hook-manager/registry.json)
    with an install strategy other than `none`
-   that a repository the operator works in uses.
+   that a repository the operator works in uses — `~/.claude/bin/prek`,
+   `~/.claude/bin/overcommit` and `~/.claude/bin/lefthook` today.
    A manager whose install strategy is `none` needs no install fix
    and gets no shim.
    A repository uses a manager when one of its config files is at the root
    (or tracked below it, for prek's nested projects) or one of its installed
    hooks runs it ([Detection](../../../../tools/hook-manager/README.md#detection));
    for prek that is `prek.toml`, `.pre-commit-config.yaml` or
-   `.pre-commit-config.yml`; for lefthook, its root `lefthook.*`,
-   `.lefthook.*` and `-local` names.
+   `.pre-commit-config.yml`; for overcommit, `.overcommit.yml`; for lefthook,
+   its root `lefthook.*`, `.lefthook.*` and `-local` names.
    Install no shim for a manager no repository uses.
    The shim takes the tool from the name it is installed under and rewrites only
-   the install subcommand: for prek it injects
-   `--git-dir "$(git rev-parse --git-common-dir)"`; for lefthook it runs the
-   install with `GIT_CONFIG_GLOBAL=/dev/null` while the global config holds one,
-   which hides the global `core.hooksPath` from lefthook's own check and lets
-   its target resolve to the common dir.
-   Both leave the install alone when the caller asked for `--help` or is outside
-   a git work tree (prek also when `--git-dir` is already passed), and every
-   other invocation passes through unchanged.
+   the install action: for prek it injects
+   `--git-dir "$(git rev-parse --git-common-dir)"` unless the caller already
+   passed `--git-dir`;
+   for overcommit it rewrites `overcommit --install` (or `-i`, `-fi`, `--inst`,
+   anywhere in argv), pointing `core.hooksPath` at `<absolute common dir>/hooks`;
+   for lefthook it runs the install with `GIT_CONFIG_GLOBAL=/dev/null` while the
+   global config holds one, which hides the global `core.hooksPath` from
+   lefthook's own check and lets its target resolve to the common dir.
+   Each leaves the install alone when the caller asked for `--help` or is outside
+   a git work tree, and **every other invocation passes through unchanged.**
    It is a no-op on hosts with no global `core.hooksPath`.
    A host that installed the older `prek-shim.sh` as `~/.claude/bin/prek` keeps
    working; replacing it is optional.
@@ -366,9 +369,9 @@ for the full rationale + the validated behaviour matrix.
    ```
 
    Confirm the rc path with the operator; print the line for them
-   to paste. Until it is on PATH ahead of the real `prek`, the
-   shim is inert and `prek install` reverts to writing into the
-   shared dir.
+   to paste. Until it is on PATH ahead of the real manager binary,
+   the shim is inert and the manager's install reverts to writing
+   into the shared dir.
 
 4. **Tell the operator how their existing prek repos are picked up.**
    Repos that already ran `prek install` before this setup have
@@ -379,7 +382,10 @@ for the full rationale + the validated behaviour matrix.
    locally via the shim. Only repos where the shim already landed
    in the shared dir (from a `prek install` run *while*
    `core.hooksPath` was set but *before* this dispatcher setup)
-   need a one-time `prek install` re-run through the shim.
+   need a one-time `prek install` re-run through the shim. An overcommit
+   repository installed before the switch already has its hook in
+   `.git/hooks/<name>`; running `overcommit --install` through the shim
+   rewrites it there after the switch.
 
 The `.` entry stays in the committed project-scope `allowRead`
 regardless — the explicit absolute path in
