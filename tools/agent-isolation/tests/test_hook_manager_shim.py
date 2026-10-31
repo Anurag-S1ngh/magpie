@@ -295,13 +295,14 @@ PLUGIN_COMPOSER = """{
 """
 
 
+@pytest.mark.parametrize("args", [["install"], ["-n", "install"], ["inst"]])
 def test_captainhook_warns_when_the_composer_plugin_is_enabled(
-    tmp_path: Path,
+    tmp_path: Path, args: list[str]
 ) -> None:
     env, _ = _setup(tmp_path, name="captainhook")
     repo = _repo(tmp_path)
     (repo / "composer.json").write_text(PLUGIN_COMPOSER)
-    result = _run(env, repo, "install", name="captainhook")
+    result = _run(env, repo, *args, name="captainhook")
     assert result.returncode == 0
     assert "captainhook/hook-installer is enabled" in result.stderr
     assert "extra.captainhook.disable-plugin" in result.stderr
